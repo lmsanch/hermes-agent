@@ -705,6 +705,32 @@ def _default_neutts_ref_text() -> str:
     return str(Path(__file__).parent / "neutts_samples" / "jo.txt")
 
 
+def _generate_fish_audio(text: str, output_path: str, tts_config: Dict[str, Any]) -> str:
+    api_key = os.getenv("FISH_AUDIO_API_KEY", tts_config.get("fish", {}).get("api_key", ""))
+    if not api_key:
+        raise RuntimeError("FISH_AUDIO_API_KEY not set")
+    voice_id = tts_config.get("fish", {}).get("voice_id", os.getenv("FISH_AUDIO_VOICE_ID", ""))
+    if not voice_id:
+        raise RuntimeError("FISH_AUDIO_VOICE_ID not set")
+    base_url = tts_config.get("fish", {}).get("base_url", "https://api.fish.audio")
+    import urllib.request
+    import json as _json
+    fish_format = "opus" if output_path.endswith(".ogg") else "mp3"
+    payload = _json.dumps({"text": text, "reference_id": voice_id, "format": fish_format}).encode("utf-8")
+    req = urllib.request.Request(
+        f"{base_url}/v1/tts",
+        data=payload,
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=60) as resp:
+        audio = resp.read()
+    if not audio or len(audio) < 100:
+        raise RuntimeError("Fish Audio returned empty or tiny response")
+    with open(output_path, "wb") as f:
+        f.write(audio)
+    return output_path
+
 def _generate_neutts(text: str, output_path: str, tts_config: Dict[str, Any]) -> str:
     """Generate speech using the local NeuTTS engine.
 
@@ -799,6 +825,8 @@ def text_to_speech_tool(
     # and needs ffmpeg for conversion.
     from gateway.session_context import get_session_env
     platform = get_session_env("HERMES_SESSION_PLATFORM", "").lower()
+    if not platform:
+        platform = os.getenv("HERMES_SESSION_PLATFORM", "").lower()
     want_opus = (platform == "telegram")
 
     # Determine output path
@@ -810,7 +838,7 @@ def text_to_speech_tool(
         out_dir.mkdir(parents=True, exist_ok=True)
         # Use .ogg for Telegram with providers that support native Opus output,
         # otherwise fall back to .mp3 (Edge TTS will attempt ffmpeg conversion later).
-        if want_opus and provider in ("openai", "elevenlabs", "mistral", "gemini"):
+        if want_opus and provider in ("openai", "elevenlabs", "mistral", "gemini", "fish"):
             file_path = out_dir / f"tts_{timestamp}.ogg"
         else:
             file_path = out_dir / f"tts_{timestamp}.mp3"
@@ -867,6 +895,13 @@ def text_to_speech_tool(
             logger.info("Generating speech with Google Gemini TTS...")
             _generate_gemini_tts(text, file_str, tts_config)
 
+        elif provider == "fish":
+            api_key = os.getenv("FISH_AUDIO_API_KEY", tts_config.get("fish", {}).get("api_key", ""))
+            if not api_key:
+                return json.dumps({"success": False, "error": "FISH_AUDIO_API_KEY not set"}, ensure_ascii=False)
+            logger.info("Generating speech with Fish Audio...")
+            _generate_fish_audio(text, file_str, tts_config)
+
         elif provider == "neutts":
             if not _check_neutts_available():
                 return json.dumps({
@@ -921,7 +956,7 @@ def text_to_speech_tool(
             if opus_path:
                 file_str = opus_path
                 voice_compatible = True
-        elif provider in ("elevenlabs", "openai", "mistral", "gemini"):
+        elif provider in ("elevenlabs", "openai", "mistral", "gemini", "fish"):
             voice_compatible = file_str.endswith(".ogg")
 
         file_size = os.path.getsize(file_str)

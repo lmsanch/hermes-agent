@@ -7372,6 +7372,21 @@ class AIAgent:
         ]
         return api_msg
 
+
+    def _supports_reasoning_content(self) -> bool:
+        """Check if the current provider supports reasoning_content in messages.
+
+        Groq and some strict APIs reject reasoning_content. Return False
+        for providers known to not support it.
+        """
+        provider = getattr(self, 'provider_label', '') or ''
+        base_url = getattr(self, 'base_url', '') or ''
+        unsupported = ('groq', 'cerebras', 'sambanova')
+        for u in unsupported:
+            if u in provider.lower() or u in base_url.lower():
+                return False
+        return True
+
     def _should_sanitize_tool_calls(self) -> bool:
         """Determine if tool_calls need sanitization for strict APIs.
 
@@ -9098,7 +9113,8 @@ class AIAgent:
                     reasoning_text = msg.get("reasoning")
                     if reasoning_text:
                         # Add reasoning_content for API compatibility (Moonshot AI, Novita, OpenRouter)
-                        api_msg["reasoning_content"] = reasoning_text
+                        if self._supports_reasoning_content():
+                            api_msg["reasoning_content"] = reasoning_text
 
                 # Remove 'reasoning' field - it's for trajectory storage only
                 # We've copied it to 'reasoning_content' for the API above

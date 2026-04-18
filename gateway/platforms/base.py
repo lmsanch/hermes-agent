@@ -1800,8 +1800,8 @@ class BasePlatformAdapter(ABC):
                         except OSError:
                             pass
 
-                # Send the text portion
-                if text_content:
+                # Send the text portion (skip if TTS voice was already sent for inbound voice)
+                if text_content and not _tts_path:
                     logger.info("[%s] Sending response (%d chars) to %s", self.name, len(text_content), event.source.chat_id)
                     result = await self._send_with_retry(
                         chat_id=event.source.chat_id,

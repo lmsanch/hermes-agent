@@ -4107,6 +4107,18 @@ class GatewayRunner:
                     )
         
         # -----------------------------------------------------------------
+        # Voice input brevity — when user sends a voice message, the
+        # response will be read aloud via TTS. Keep answers concise and
+        # conversational (2-3 sentences max). No markdown, no lists.
+        # -----------------------------------------------------------------
+        if event.message_type == MessageType.VOICE:
+            context_prompt += (                "\n\n[System note: The user sent a voice message. Your reply "
+                "will be read aloud via text-to-speech. Keep it brief, "
+                "conversational, and spoken-style — 2-3 sentences max. "
+                "No markdown, no bullet lists, no code blocks. Answer as "
+                "if talking on a walkie-talkie.]"
+            )
+        # -----------------------------------------------------------------
         # Voice channel awareness — inject current voice channel state
         # into context so the agent knows who is in the channel and who
         # is speaking, without needing a separate tool call.
@@ -7769,6 +7781,7 @@ class GatewayRunner:
         in a ``finally`` block.
         """
         from gateway.session_context import set_session_vars
+        os.environ["HERMES_SESSION_PLATFORM"] = context.source.platform.value
         return set_session_vars(
             platform=context.source.platform.value,
             chat_id=context.source.chat_id,
