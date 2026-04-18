@@ -17,6 +17,45 @@ Kill-switches (env vars):
 - ``HERMES_TS_DISABLED=true`` — completely disables TS; returns None.
 - ``HERMES_TS_DRY_RUN=true`` — samples and logs but does not route or
   mutate state; returns None (falls through to primary).
+
+Configuration example (``config.yaml`` ``smart_model_routing`` section)::
+
+    smart_model_routing:
+      mode: thompson_sampling
+      thompson_sampling:
+        # Persistent state file (default: ~/.hermes/ts_hermes_mds.json)
+        # state_path: /path/to/ts_state.json
+        arms:
+          - name: fireworks-glm5
+            provider: fireworks
+            model: accounts/fireworks/models/glm-5
+            api_key_env: FIREWORKS_API_KEY   # optional; resolved via env
+            base_url: https://api.fireworks.ai/inference/v1  # optional
+          - name: anthropic-sonnet
+            provider: anthropic
+            model: claude-sonnet-4-6
+            api_key_env: ANTHROPIC_API_KEY
+          - name: qwen3-235b
+            provider: together
+            model: Qwen/Qwen3-235B-A22B-Instruct-2507-tput
+            api_key_env: TOGETHER_API_KEY
+
+State file schema (``ts_hermes_mds.json``)::
+
+    {
+      "arms": {
+        "fireworks-glm5": {"a": 1.0, "b": 1.0, "wins": 0, "losses": 0, "last_updated": ""},
+        "anthropic-sonnet": {"a": 1.0, "b": 1.0, "wins": 0, "losses": 0, "last_updated": ""}
+      },
+      "version": 1
+    }
+
+Arm resolution: when TS picks an arm, the returned route dict has the exact
+shape the gateway expects: ``{model, runtime, label, signature}``.  Provider
+credentials are resolved via ``resolve_runtime_provider``.  If credential
+resolution fails for the chosen arm (missing API key, no custom_providers
+entry), the function logs a warning and returns ``None`` so the gateway falls
+back to the primary model.
 """
 
 from __future__ import annotations
