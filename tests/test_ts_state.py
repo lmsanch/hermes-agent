@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from agent.ts_state import load_state, record_outcome, thompson_sample
+from agent.ts_state import classify_outcome, load_state, record_outcome, thompson_sample
 
 
 @pytest.fixture
@@ -52,3 +52,31 @@ class TestThompsonSample:
         fresh = load_state(state_path)
         assert fresh["arms"]["x"]["wins"] == 1
         assert fresh["arms"]["y"]["losses"] == 1
+
+
+class TestClassifyOutcome:
+    def test_none_is_loss(self):
+        assert classify_outcome(None) is False
+
+    def test_empty_dict_is_loss(self):
+        assert classify_outcome({}) is False
+
+    def test_non_empty_final_response_is_win(self):
+        assert classify_outcome({"final_response": "hello"}) is True
+
+    def test_whitespace_only_final_response_is_loss(self):
+        assert classify_outcome({"final_response": "   \n "}) is False
+
+    def test_failed_flag_is_loss(self):
+        assert classify_outcome({"final_response": "hi", "failed": True}) is False
+
+    def test_compression_exhausted_is_loss(self):
+        assert (
+            classify_outcome({"final_response": "hi", "compression_exhausted": True})
+            is False
+        )
+
+    def test_error_field_is_loss(self):
+        assert (
+            classify_outcome({"final_response": "hi", "error": "boom"}) is False
+        )

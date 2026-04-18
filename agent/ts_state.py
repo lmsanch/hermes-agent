@@ -103,3 +103,26 @@ def record_outcome(arm_key: str, success: bool, path: Path) -> None:
             json.dump(state, f, indent=2)
     finally:
         _release_lock(lock_fd)
+
+
+def classify_outcome(result: Optional[dict]) -> bool:
+    """Map a ``run_conversation`` result dict to a binary TS outcome.
+
+    Returns True (win) when the agent produced a non-empty final_response
+    and did not flag failure. Returns False (loss) when the result is
+    missing, marked failed, compression-exhausted, or has an empty
+    response. Matches the ``ok`` / ``no_response`` taxonomy used by the
+    gateway's turn finaliser.
+    """
+    if not result:
+        return False
+    if result.get("failed"):
+        return False
+    if result.get("compression_exhausted"):
+        return False
+    final = result.get("final_response") or ""
+    if not str(final).strip():
+        return False
+    if result.get("error"):
+        return False
+    return True

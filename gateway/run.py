@@ -1009,6 +1009,33 @@ class GatewayRunner:
         route["request_overrides"] = overrides
         return route
 
+    def _record_turn_outcome(self, turn_route: dict, result) -> None:
+        """Record a Beta-Bernoulli outcome when the turn used a TS arm.
+
+        No-op when ``turn_route`` is from cheap_model mode, the primary
+        route fallback, or any non-TS code path — those never set
+        ``arm_key`` / ``state_path``. Exceptions are swallowed (with a
+        warning) because a failed outcome write must not propagate up
+        into the gateway.
+        """
+        arm_key = turn_route.get("arm_key") if turn_route else None
+        state_path = turn_route.get("state_path") if turn_route else None
+        if not arm_key or not state_path:
+            return
+        try:
+            from agent.ts_state import classify_outcome, record_outcome
+            from pathlib import Path
+
+            success = classify_outcome(result)
+            record_outcome(arm_key, success, Path(state_path))
+            logger.info(
+                "TS outcome recorded: arm=%s success=%s", arm_key, success
+            )
+        except Exception as exc:
+            logger.warning(
+                "TS record_outcome failed for arm=%s: %s", arm_key, exc
+            )
+
     async def _handle_adapter_fatal_error(self, adapter: BasePlatformAdapter) -> None:
         """React to an adapter failure after startup.
 
@@ -5879,6 +5906,7 @@ class GatewayRunner:
                     self._cleanup_agent_resources(agent)
 
             result = await self._run_in_executor_with_context(run_sync)
+            self._record_turn_outcome(turn_route, result)
 
             response = result.get("final_response", "") if result else ""
             if not response and result and result.get("error"):
@@ -6064,6 +6092,7 @@ class GatewayRunner:
                     self._cleanup_agent_resources(agent)
 
             result = await self._run_in_executor_with_context(run_sync)
+            self._record_turn_outcome(turn_route, result)
 
             response = (result.get("final_response") or "") if result else ""
             if not response and result and result.get("error"):
@@ -9195,6 +9224,7 @@ class GatewayRunner:
                 unregister_gateway_notify(_approval_session_key)
                 reset_current_session_key(_approval_session_token)
             result_holder[0] = result
+            self._record_turn_outcome(turn_route, result)
 
             # Signal the stream consumer that the agent is done
             if _stream_consumer is not None:
