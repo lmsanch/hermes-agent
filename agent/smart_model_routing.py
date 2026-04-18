@@ -293,6 +293,8 @@ def choose_thompson_sampling_route(
             runtime.get("command"),
             tuple(runtime.get("args") or ()),
         ),
+        "arm_key": chosen_key,
+        "state_path": str(state_path),
     }
 
 
@@ -316,6 +318,8 @@ def resolve_turn_route(
                 "runtime": route["runtime"],
                 "label": route["label"],
                 "signature": route["signature"],
+                "arm_key": route.get("arm_key"),
+                "state_path": route.get("state_path"),
             }
         return _primary_route(primary)
 

@@ -136,6 +136,67 @@ class TestResolveTurnRoute:
         assert route["model"] == "gpt-4o-mini"
         assert "thompson sampling" in (route["label"] or "")
 
+    def test_ts_route_exposes_arm_key_and_state_path(self, ts_config, state_path):
+        runtime_stub = {
+            "api_key": "sk-test",
+            "base_url": "https://api.openai.com/v1",
+            "provider": "openai",
+            "api_mode": "chat",
+            "command": None,
+            "args": [],
+            "credential_pool": None,
+        }
+        with (
+            patch(
+                "hermes_cli.runtime_provider.resolve_runtime_provider",
+                return_value=runtime_stub,
+            ),
+            patch.dict(os.environ, {"OPENAI_API_KEY": "sk-test"}),
+            patch("agent.ts_state.thompson_sample", return_value="arm_a"),
+        ):
+            route = resolve_turn_route("hello", ts_config, PRIMARY)
+        assert route["arm_key"] == "arm_a"
+        assert route["state_path"] == str(state_path)
+
+    def test_primary_fallback_has_no_arm_key(self):
+        config = {
+            "mode": "thompson_sampling",
+            "thompson_sampling": {"arms": []},  # empty → TS returns None → primary
+        }
+        route = resolve_turn_route("hello", config, PRIMARY)
+        assert route.get("arm_key") is None
+        assert route.get("state_path") is None
+
+    def test_ts_record_outcome_persists_arm_state(
+        self, ts_config, state_path
+    ):
+        from agent.ts_state import load_state, record_outcome
+
+        runtime_stub = {
+            "api_key": "sk-test",
+            "base_url": "https://api.openai.com/v1",
+            "provider": "openai",
+            "api_mode": "chat",
+            "command": None,
+            "args": [],
+            "credential_pool": None,
+        }
+        with (
+            patch(
+                "hermes_cli.runtime_provider.resolve_runtime_provider",
+                return_value=runtime_stub,
+            ),
+            patch.dict(os.environ, {"OPENAI_API_KEY": "sk-test"}),
+            patch("agent.ts_state.thompson_sample", return_value="arm_b"),
+        ):
+            route = resolve_turn_route("hello", ts_config, PRIMARY)
+        from pathlib import Path as _P
+
+        record_outcome(route["arm_key"], True, _P(route["state_path"]))
+        state = load_state(_P(route["state_path"]), arm_keys=["arm_b"])
+        assert state["arms"]["arm_b"]["wins"] == 1
+        assert state["arms"]["arm_b"]["a"] == 2.0
+
     def test_cheap_model_mode_unchanged(self):
         config = {
             "mode": "cheap_model",
