@@ -1009,6 +1009,22 @@ class GatewayRunner:
         route["request_overrides"] = overrides
         return route
 
+    def _maybe_language_hint(self, user_message: str) -> str:
+        """Gateway-side wrapper for ``agent.language_hint.apply_hint_if_enabled``.
+
+        Thin delegate so the three ``run_conversation()`` call sites can
+        pre-process the user message uniformly. Behavior is env-gated
+        and default-off — see ``apply_hint_if_enabled`` docstring.
+        """
+        try:
+            from agent.language_hint import apply_hint_if_enabled
+            return apply_hint_if_enabled(user_message)
+        except Exception as exc:
+            logger.warning(
+                "language hint failed, passing message through: %s", exc
+            )
+            return user_message
+
     def _record_turn_outcome(self, turn_route: dict, result) -> None:
         """Record a Beta-Bernoulli outcome when the turn used a TS arm.
 
@@ -5899,7 +5915,7 @@ class GatewayRunner:
                 )
                 try:
                     return agent.run_conversation(
-                        user_message=prompt,
+                        user_message=self._maybe_language_hint(prompt),
                         task_id=task_id,
                     )
                 finally:
@@ -6084,7 +6100,7 @@ class GatewayRunner:
                 )
                 try:
                     return agent.run_conversation(
-                        user_message=btw_prompt,
+                        user_message=self._maybe_language_hint(btw_prompt),
                         conversation_history=history_snapshot,
                         task_id=task_id,
                     )
@@ -9219,7 +9235,7 @@ class GatewayRunner:
             _approval_session_token = set_current_session_key(_approval_session_key)
             register_gateway_notify(_approval_session_key, _approval_notify_sync)
             try:
-                result = agent.run_conversation(message, conversation_history=agent_history, task_id=session_id)
+                result = agent.run_conversation(self._maybe_language_hint(message), conversation_history=agent_history, task_id=session_id)
             finally:
                 unregister_gateway_notify(_approval_session_key)
                 reset_current_session_key(_approval_session_token)
