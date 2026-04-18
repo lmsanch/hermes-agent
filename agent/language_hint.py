@@ -262,7 +262,7 @@ def apply_hint_if_enabled(user_message: str) -> str:
             min_conf = 0.65
         prefixed, lang = maybe_prefix(user_message, min_confidence=min_conf)
         if lang is not None:
-            logger.debug("language hint applied: lang=%s", lang)
+            logger.info("language hint applied: lang=%s", lang)
         return prefixed
     except Exception as exc:
         logger.warning(
