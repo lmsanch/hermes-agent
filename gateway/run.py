@@ -1489,6 +1489,21 @@ class GatewayRunner:
         merge_pending_message_event(adapter._pending_messages, session_key, event)
 
     async def _handle_active_session_busy_message(self, event: MessageEvent, session_key: str) -> bool:
+        # Auth check FIRST: unauthorized senders must never trigger an
+        # outbound reply, including the busy-ack. Without this, two
+        # gateways configured with each other's address as unauthorized
+        # can ping-pong busy-acks forever (Toryx 2026-04-19 incident:
+        # 487 emails between two MD profiles in 20 min). Internal events
+        # bypass auth as elsewhere in the codebase.
+        if not getattr(event, 'internal', False) and event.source.user_id is not None:
+            if not self._is_user_authorized(event.source):
+                logger.info(
+                    'Suppressed busy-ack to unauthorized sender %s on %s',
+                    event.source.user_id,
+                    event.source.platform.value if event.source.platform else 'unknown',
+                )
+                return True  # consume event silently
+
         # --- Draining case (gateway restarting/stopping) ---
         if self._draining:
             adapter = self.adapters.get(event.source.platform)
