@@ -158,6 +158,19 @@ def _extract_email_address(raw: str) -> str:
     return raw.strip().lower()
 
 
+def _extract_all_recipients(msg) -> list:
+    """Extract all recipient addresses from To, Cc, and Delivered-To headers."""
+    recipients = set()
+    for header in ["To", "Cc", "Delivered-To"]:
+        value = msg.get(header, "")
+        if value:
+            for addr in value.split(","):
+                email = _extract_email_address(addr.strip())
+                if email:
+                    recipients.add(email.lower())
+    return list(recipients)
+
+
 def _extract_attachments(
     msg: email_lib.message.Message,
     skip_attachments: bool = False,
@@ -371,6 +384,12 @@ class EmailAdapter(BasePlatformAdapter):
                     raw_email = msg_data[0][1]
                     msg = email_lib.message_from_bytes(raw_email)
 
+                    # Filter: only process messages addressed to this agent
+                    all_recipients = _extract_all_recipients(msg)
+                    if all_recipients and self._address.lower() not in all_recipients:
+                        logger.debug("[Email] Skipping msg %s - not for %s", uid, self._address)
+                        continue
+
                     sender_raw = msg.get("From", "")
                     sender_addr = _extract_email_address(sender_raw)
                     sender_name = _decode_header_value(sender_raw)
@@ -419,6 +438,15 @@ class EmailAdapter(BasePlatformAdapter):
         # Skip self-messages
         if sender_addr == self._address.lower():
             return
+
+        # Drop senders explicitly blocklisted via EMAIL_IGNORED_SENDERS.
+        # Prevents intra-fleet email loops (MD-to-MD busy-ack bouncing).
+        ignored_raw = os.getenv("EMAIL_IGNORED_SENDERS", "").strip()
+        if ignored_raw and sender_addr:
+            ignored_set = {a.strip().lower() for a in ignored_raw.split(",") if a.strip()}
+            if sender_addr.lower() in ignored_set:
+                logger.info("[Email] Ignoring blocklisted sender: %s", sender_addr)
+                return
 
         # Never reply to automated senders
         if _is_automated_sender(sender_addr, {}):
