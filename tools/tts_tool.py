@@ -2,13 +2,14 @@
 """
 Text-to-Speech Tool Module
 
-Supports seven TTS providers:
+Supports eight TTS providers:
 - Edge TTS (default, free, no API key): Microsoft Edge neural voices
 - ElevenLabs (premium): High-quality voices, needs ELEVENLABS_API_KEY
 - OpenAI TTS: Good quality, needs OPENAI_API_KEY
 - MiniMax TTS: High-quality with voice cloning, needs MINIMAX_API_KEY
 - Mistral (Voxtral TTS): Multilingual, native Opus, needs MISTRAL_API_KEY
 - Google Gemini TTS: Controllable, 30 prebuilt voices, needs GEMINI_API_KEY
+- Fish Audio: Voice cloning, cross-lingual, needs FISH_AUDIO_API_KEY + voice_id
 - NeuTTS (local, free, no API key): On-device TTS via neutts_cli, needs neutts installed
 
 Output formats:
@@ -100,6 +101,8 @@ DEFAULT_XAI_LANGUAGE = "en"
 DEFAULT_XAI_SAMPLE_RATE = 24000
 DEFAULT_XAI_BIT_RATE = 128000
 DEFAULT_XAI_BASE_URL = "https://api.x.ai/v1"
+DEFAULT_FISH_AUDIO_BASE_URL = "https://api.fish.audio"
+DEFAULT_FISH_AUDIO_VOICE_ID = ""
 DEFAULT_GEMINI_TTS_MODEL = "gemini-2.5-flash-preview-tts"
 DEFAULT_GEMINI_TTS_VOICE = "Kore"
 DEFAULT_GEMINI_TTS_BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
@@ -759,6 +762,66 @@ def _generate_neutts(text: str, output_path: str, tts_config: Dict[str, Any]) ->
 
 
 # ===========================================================================
+# Provider: Fish Audio TTS (voice cloning)
+# ===========================================================================
+def _generate_fish_audio(text: str, output_path: str, tts_config: Dict[str, Any]) -> str:
+    import requests
+
+    fish_config = tts_config.get("fish", {})
+    voice_id = str(fish_config.get("voice_id", "") or os.getenv("FISH_AUDIO_VOICE_ID", "")).strip()
+
+    if not voice_id:
+        logger.error(
+            "Fish Audio: voice_id is empty — refusing to call API "
+            "(would silently return a generic English voice). "
+            "Set tts.fish.voice_id in config.yaml or FISH_AUDIO_VOICE_ID in .env."
+        )
+        raise ValueError(
+            "Fish Audio voice_id is empty — the API would silently use "
+            "a generic English voice instead of the configured clone. "
+            "Set tts.fish.voice_id in config.yaml."
+        )
+
+    api_key = os.getenv("FISH_AUDIO_API_KEY", "").strip()
+    if not api_key:
+        raise ValueError("FISH_AUDIO_API_KEY not set. Get one at https://fish.audio/")
+
+    base_url = str(
+        fish_config.get("base_url")
+        or os.getenv("FISH_AUDIO_BASE_URL")
+        or DEFAULT_FISH_AUDIO_BASE_URL
+    ).strip().rstrip("/")
+
+    payload = json.dumps({
+        "text": text[:2000],
+        "reference_id": voice_id,
+    }).encode("utf-8")
+
+    req_headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+
+    response = requests.post(
+        f"{base_url}/v1/tts",
+        data=payload,
+        headers=req_headers,
+        timeout=60,
+    )
+    response.raise_for_status()
+
+    audio_bytes = response.content
+    if not audio_bytes:
+        raise ValueError("Fish Audio returned empty audio")
+
+    with open(output_path, "wb") as f:
+        f.write(audio_bytes)
+
+    logger.info("Fish Audio TTS: %d bytes (voice=%s…)", len(audio_bytes), voice_id[:8])
+    return output_path
+
+
+# ===========================================================================
 # Main tool function
 # ===========================================================================
 def text_to_speech_tool(
@@ -877,6 +940,10 @@ def text_to_speech_tool(
             logger.info("Generating speech with NeuTTS (local)...")
             _generate_neutts(text, file_str, tts_config)
 
+        elif provider == "fish":
+            logger.info("Generating speech with Fish Audio TTS...")
+            _generate_fish_audio(text, file_str, tts_config)
+
         else:
             # Default: Edge TTS (free), with NeuTTS as local fallback
             edge_available = True
@@ -916,7 +983,7 @@ def text_to_speech_tool(
         # Try Opus conversion for Telegram compatibility
         # Edge TTS outputs MP3, NeuTTS outputs WAV — both need ffmpeg conversion
         voice_compatible = False
-        if provider in ("edge", "neutts", "minimax", "xai") and not file_str.endswith(".ogg"):
+        if provider in ("edge", "neutts", "minimax", "xai", "fish") and not file_str.endswith(".ogg"):
             opus_path = _convert_to_opus(file_str)
             if opus_path:
                 file_str = opus_path
@@ -990,6 +1057,19 @@ def check_tts_requirements() -> bool:
     if os.getenv("MINIMAX_API_KEY"):
         return True
     if os.getenv("XAI_API_KEY"):
+        return True
+    if os.getenv("FISH_AUDIO_API_KEY"):
+        fish_config = _load_tts_config().get("fish", {})
+        fish_voice_id = (
+            fish_config.get("voice_id", "")
+            or os.getenv("FISH_AUDIO_VOICE_ID", "")
+        ).strip()
+        if not fish_voice_id:
+            logger.error(
+                "Fish Audio: FISH_AUDIO_API_KEY is set but voice_id is empty — "
+                "voice replies will fail loudly instead of using the generic "
+                "English fallback. Set tts.fish.voice_id in config.yaml."
+            )
         return True
     if os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY"):
         return True
