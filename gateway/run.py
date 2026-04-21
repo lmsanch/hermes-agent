@@ -334,6 +334,44 @@ def _expand_whatsapp_auth_aliases(identifier: str) -> set:
 
 logger = logging.getLogger(__name__)
 
+_VOICE_BREVITY_PREFIX = (
+    "[VOICE MODE — your reply will be SPOKEN aloud. Respond in 3-5 sentences, "
+    "up to 120 words. Use natural punctuation — pauses, commas, periods. "
+    "No markdown, no bullet points, no headers, no links. Mirror the user's "
+    "language exactly: if the user spoke Spanish, reply in Spanish; if English, "
+    "reply in English. Conversational tone with proper sentence structure. "
+    "Be substantive, not terse.] "
+)
+
+_LANG_HINT_ENABLED = os.environ.get("HERMES_LANG_HINT_ENABLED", "true").lower() in {
+    "1", "true", "yes",
+}
+
+
+def detect_language(text: str) -> str:
+    if not text or len(text.strip()) < 2:
+        return "en"
+    lowered = text.lower()
+    if re.search(r"[ñáéíóúü¿¡]", lowered):
+        return "es"
+    try:
+        from langdetect import detect, DetectorFactory
+        DetectorFactory.seed = 0
+        if detect(text) == "es":
+            return "es"
+    except ImportError:
+        pass
+    except Exception:
+        pass
+    es_markers = {
+        "hola", "buenos", "gracias", "por favor", "cómo", "qué",
+        "dónde", "cuándo", "puedes", "está", "son", "soy",
+    }
+    if any(m in lowered for m in es_markers):
+        return "es"
+    return "en"
+
+
 # Sentinel placed into _running_agents immediately when a session starts
 # processing, *before* any await.  Prevents a second message for the same
 # session from bypassing the "already running" guard during the async gap
@@ -3534,6 +3572,19 @@ class GatewayRunner:
                     message_text = _ctx_result.message
             except Exception as exc:
                 logger.debug("@ context reference expansion failed: %s", exc)
+
+        _is_voice_input = (
+            event.message_type in (MessageType.VOICE, MessageType.AUDIO)
+        )
+        if _is_voice_input:
+            message_text = _VOICE_BREVITY_PREFIX + message_text
+
+        if _LANG_HINT_ENABLED:
+            lang = detect_language(message_text)
+            if lang and lang != "en":
+                lang_hint = f"[RESPOND IN: {lang.upper()}] "
+                message_text = lang_hint + message_text
+                logger.info("Language hint injected: %s", lang_hint.strip())
 
         return message_text
 
