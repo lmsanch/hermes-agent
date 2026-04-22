@@ -15,6 +15,12 @@ import html as _html
 import re
 from typing import Dict, List, Optional, Any
 
+try:
+    from tools.secret_redactor import redact as _redact_secrets
+except ImportError:  # pragma: no cover
+    def _redact_secrets(text: str) -> str:
+        return text
+
 logger = logging.getLogger(__name__)
 
 try:
@@ -935,7 +941,10 @@ class TelegramAdapter(BasePlatformAdapter):
         # Skip whitespace-only text to prevent Telegram 400 empty-text errors.
         if not content or not content.strip():
             return SendResult(success=True, message_id=None)
-        
+
+        # Redact known secrets before any user-visible processing. See #818.
+        content = _redact_secrets(content)
+
         try:
             # Format and split message if needed
             formatted = self.format_message(content)
