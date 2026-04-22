@@ -42,6 +42,12 @@ from gateway.platforms.base import (
 )
 from gateway.config import Platform, PlatformConfig
 
+try:
+    from tools.secret_redactor import redact as _redact_secrets
+except ImportError:  # pragma: no cover
+    def _redact_secrets(text: str) -> str:
+        return text
+
 logger = logging.getLogger(__name__)
 # Automated sender patterns — emails from these are silently ignored
 _NOREPLY_PATTERNS = (
@@ -470,6 +476,8 @@ class EmailAdapter(BasePlatformAdapter):
         metadata: Optional[Dict[str, Any]] = None,
     ) -> SendResult:
         """Send an email reply to the given address."""
+        # Redact known secrets before any user-visible processing. See #818.
+        content = _redact_secrets(content)
         try:
             loop = asyncio.get_running_loop()
             message_id = await loop.run_in_executor(

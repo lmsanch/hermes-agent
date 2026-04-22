@@ -48,6 +48,12 @@ from tools.managed_tool_gateway import resolve_managed_tool_gateway
 from tools.tool_backend_helpers import managed_nous_tools_enabled, prefers_gateway, resolve_openai_audio_api_key
 from tools.xai_http import hermes_xai_user_agent
 
+try:
+    from tools.secret_redactor import redact as _redact_secrets
+except ImportError:  # pragma: no cover
+    def _redact_secrets(text: str) -> str:
+        return text
+
 # ---------------------------------------------------------------------------
 # Lazy imports -- providers are imported only when actually used to avoid
 # crashing in headless environments (SSH, Docker, WSL, no PortAudio).
@@ -784,6 +790,10 @@ def text_to_speech_tool(
     """
     if not text or not text.strip():
         return tool_error("Text is required", success=False)
+
+    # Redact known secrets before synthesis — voice output is as public as
+    # chat text. See toryx-private#818.
+    text = _redact_secrets(text)
 
     # Truncate very long text with a warning
     if len(text) > MAX_TEXT_LENGTH:
