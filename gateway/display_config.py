@@ -23,6 +23,35 @@ from __future__ import annotations
 
 from typing import Any
 
+
+
+# ---------------------------------------------------------------------------
+# Internal/retrieval tools — hidden from user-facing chat by default
+# ---------------------------------------------------------------------------
+# These are agent-internal retrieval and search tools that produce no
+# user-visible output.  Showing them in chat adds noise without value.
+# The "internal" tool_progress mode filters these out; "all" and "verbose"
+# modes still show them.  See toryx-private#814.
+_INTERNAL_TOOLS: frozenset[str] = frozenset({
+    "session_search",
+    "search_files",
+    "skill_view",
+    "skills_list",
+    "memory",
+    "recall_search",
+    "recall",
+    "web_search",
+    "web_extract",
+    "read_file",
+    "list_files",
+    "vision_analyze",
+})
+
+
+def is_internal_tool(tool_name: str) -> bool:
+    """Return True if *tool_name* is an internal/retrieval tool."""
+    return tool_name in _INTERNAL_TOOLS
+
 # ---------------------------------------------------------------------------
 # Overrideable display settings and their global defaults
 # ---------------------------------------------------------------------------
@@ -31,7 +60,7 @@ from typing import Any
 # and don't participate in per-platform resolution.
 
 _GLOBAL_DEFAULTS: dict[str, Any] = {
-    "tool_progress": "all",
+    "tool_progress": "internal",
     "show_reasoning": False,
     "tool_preview_length": 0,
     "streaming": None,  # None = follow top-level streaming config
@@ -46,7 +75,7 @@ _GLOBAL_DEFAULTS: dict[str, Any] = {
 # Tier 4 (minimal): Batch/non-interactive delivery
 
 _TIER_HIGH = {
-    "tool_progress": "all",
+    "tool_progress": "internal",
     "show_reasoning": False,
     "tool_preview_length": 40,
     "streaming": None,  # follow global
