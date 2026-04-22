@@ -63,7 +63,7 @@ _HAS_MISTRAL = _safe_find_spec("mistralai")
 
 DEFAULT_PROVIDER = "local"
 DEFAULT_LOCAL_MODEL = "base"
-DEFAULT_LOCAL_STT_LANGUAGE = "en"
+DEFAULT_LOCAL_STT_LANGUAGE = None
 DEFAULT_STT_MODEL = os.getenv("STT_OPENAI_MODEL", "whisper-1")
 DEFAULT_GROQ_STT_MODEL = os.getenv("STT_GROQ_MODEL", "whisper-large-v3-turbo")
 DEFAULT_MISTRAL_STT_MODEL = os.getenv("STT_MISTRAL_MODEL", "voxtral-mini-latest")
@@ -308,11 +308,11 @@ def _transcribe_local(file_path: str, model_name: str) -> Dict[str, Any]:
         transcript = " ".join(segment.text.strip() for segment in segments)
 
         logger.info(
-            "Transcribed %s via local whisper (%s, lang=%s, %.1fs audio)",
-            Path(file_path).name, model_name, info.language, info.duration,
+            "stt: detected=%s, model=%s, %.1fs audio — %s",
+            info.language, model_name, info.duration, Path(file_path).name,
         )
 
-        return {"success": True, "transcript": transcript, "provider": "local"}
+        return {"success": True, "transcript": transcript, "provider": "local", "detected_language": info.language}
 
     except Exception as e:
         logger.error("Local transcription failed: %s", e, exc_info=True)
@@ -353,12 +353,16 @@ def _transcribe_local_command(file_path: str, model_name: str) -> Dict[str, Any]
             ),
         }
 
-    # Language: config.yaml (stt.local.language) > env var > "en" default.
+    # Language: config.yaml (stt.local.language) > env var > auto-detect.
+    # None = auto-detect (Whisper will identify the language). This fixes
+    # Spanish voice messages being transcribed as English. See toryx-private#803.
     language = (
         _load_stt_config().get("local", {}).get("language")
         or os.getenv(LOCAL_STT_LANGUAGE_ENV)
         or DEFAULT_LOCAL_STT_LANGUAGE
     )
+    # For CLI whisper, --language requires a value; use "auto" for auto-detect.
+    cli_language = language or "auto"
     normalized_model = _normalize_local_command_model(model_name)
 
     try:
@@ -370,7 +374,7 @@ def _transcribe_local_command(file_path: str, model_name: str) -> Dict[str, Any]
             command = command_template.format(
                 input_path=shlex.quote(prepared_input),
                 output_dir=shlex.quote(output_dir),
-                language=shlex.quote(language),
+                language=shlex.quote(cli_language),
                 model=shlex.quote(normalized_model),
             )
             subprocess.run(command, shell=True, check=True, capture_output=True, text=True)
