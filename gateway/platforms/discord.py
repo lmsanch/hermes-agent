@@ -20,6 +20,12 @@ import time
 from collections import defaultdict
 from typing import Callable, Dict, Optional, Any
 
+try:
+    from tools.secret_redactor import redact as _redact_secrets
+except ImportError:  # pragma: no cover
+    def _redact_secrets(text: str) -> str:
+        return text
+
 logger = logging.getLogger(__name__)
 
 VALID_THREAD_AUTO_ARCHIVE_MINUTES = {60, 1440, 4320, 10080}
@@ -860,6 +866,9 @@ class DiscordAdapter(BasePlatformAdapter):
         """
         if not self._client:
             return SendResult(success=False, error="Not connected")
+
+        # Redact known secrets before any user-visible processing. See #818.
+        content = _redact_secrets(content)
 
         try:
             # Determine target channel: thread_id in metadata takes precedence.
