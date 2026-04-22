@@ -6281,9 +6281,10 @@ class GatewayRunner:
             )
 
         # --- cycle mode (per-platform) ----------------------------------------
-        cycle = ["off", "new", "all", "verbose"]
+        cycle = ["off", "internal", "new", "all", "verbose"]
         descriptions = {
             "off": "⚙️ Tool progress: **OFF** — no tool activity shown.",
+            "internal": "⚙️ Tool progress: **INTERNAL** — hides retrieval/search tools, shows a collapsed summary (default for Telegram).",
             "new": "⚙️ Tool progress: **NEW** — shown when tool changes (preview length: `display.tool_preview_length`, default 40).",
             "all": "⚙️ Tool progress: **ALL** — every tool call shown (preview length: `display.tool_preview_length`, default 40).",
             "verbose": "⚙️ Tool progress: **VERBOSE** — every tool call with full arguments.",
@@ -6291,7 +6292,7 @@ class GatewayRunner:
 
         # Read current effective mode for this platform via the resolver
         from gateway.display_config import resolve_display_setting
-        current = resolve_display_setting(user_config, platform_key, "tool_progress", "all")
+        current = resolve_display_setting(user_config, platform_key, "tool_progress", "internal")
         if current not in cycle:
             current = "all"
         idx = (cycle.index(current) + 1) % len(cycle)
@@ -8440,6 +8441,8 @@ class GatewayRunner:
         last_tool = [None]  # Mutable container for tracking in closure
         last_progress_msg = [None]  # Track last message for dedup
         repeat_count = [0]  # How many times the same message repeated
+        _internal_counter = [0]  # Count of suppressed internal tool calls
+        last_internal_tool = [None]  # Last internal tool name (for collapsed summary)
         
         def progress_callback(event_type: str, tool_name: str = None, preview: str = None, args: dict = None, **kwargs):
             """Callback invoked by agent on tool lifecycle events."""
@@ -8448,6 +8451,16 @@ class GatewayRunner:
 
             # Only act on tool.started events (ignore tool.completed, reasoning.available, etc.)
             if event_type not in ("tool.started",):
+                return
+
+            # Filter internal/retrieval tools from user-facing chat.
+            # "internal" mode hides them; "all" and "verbose" show everything.
+            from gateway.display_config import is_internal_tool
+            _is_internal = is_internal_tool(tool_name or "")
+            if _is_internal and progress_mode in ("internal", "new"):
+                # Count but don't display — we'll emit a collapsed summary later
+                _internal_counter[0] += 1
+                last_internal_tool[0] = tool_name
                 return
 
             # "new" mode: only report when tool changes
@@ -8647,6 +8660,18 @@ class GatewayRunner:
         tools_holder = [None]   # Mutable container for the tool definitions
         stream_consumer_holder = [None]  # Mutable container for stream consumer
         
+        # Emit collapsed internal-tool summary before agent result.
+        # When "internal" progress mode hid retrieval/search calls, show a
+        # single line like "🔍 Searching… (3 queries)" so the user knows
+        # work happened, without the wall of individual tool traces.
+        if _internal_counter[0] > 0 and progress_queue is not None:
+            _summary_parts = []
+            if _internal_counter[0] == 1:
+                _summary_parts.append(f"🔍 {last_internal_tool[0] or 'searching'}…")
+            else:
+                _summary_parts.append(f"🔍 Searching… ({_internal_counter[0]} queries)")
+            progress_queue.put(_summary_parts[0])
+
         # Bridge sync step_callback → async hooks.emit for agent:step events
         _loop_for_step = asyncio.get_running_loop()
         _hooks_ref = self.hooks
