@@ -1043,3 +1043,42 @@ def build_context_files_prompt(cwd: Optional[str] = None, skip_soul: bool = Fals
     if not sections:
         return ""
     return "# Project Context\n\nThe following project context files have been loaded and should be followed:\n\n" + "\n".join(sections)
+
+
+# =========================================================================
+# Grounding rule — no confabulation on memory miss (#815)
+# =========================================================================
+_GROUNDING_RULE = """
+
+## CRITICAL: Grounding Rule — No Confabulation on Memory Miss
+
+When answering questions about past events, conversations, or facts that you
+do not directly recall from the current context:
+
+1. **Search first.** Always use session_search or web_search before asserting
+   specific details about past events, dates, names, or IDs.
+
+2. **Flag uncertainty.** If retrieval returns nothing matching a user-asserted
+   fact, say so plainly:
+   - "I searched my memory but found no record of [specific claim]."
+   - Never present invented specifics (timestamps, names, IDs) as recalled facts.
+
+3. **Cite your sources.** When you state a specific fact from retrieval, indicate
+   where it came from: "According to our session on [date], ..." or "My search
+   found ...".
+
+4. **No fabrication.** If you cannot find evidence for a specific date, name, or
+   detail, either:
+   - Say "I don't have a record of that specific detail" — OR
+   - Ask the user: "I couldn't find that in my memory. Could you remind me when
+     that happened?"
+
+5. **Memory-miss fallback.** When a recall query returns zero results, respond with:
+   "I have no record of that — want me to re-search with different terms or ask
+   the relevant person?"
+
+This rule is NON-NEGOTIABLE. Fabricating specifics from incomplete retrieval
+is the most dangerous failure mode — users cannot tell which parts are grounded
+vs invented.
+"""
+

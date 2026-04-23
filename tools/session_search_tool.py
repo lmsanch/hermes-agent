@@ -348,7 +348,12 @@ def session_search(
                 "query": query,
                 "results": [],
                 "count": 0,
-                "message": "No matching sessions found.",
+                "message": (
+                    "No matching sessions found. "
+                    "GROUNDING: Do NOT fabricate specific details (dates, names, IDs) "
+                    "about this topic — say 'I have no record of that' instead. "
+                    "Ask the user if they want to re-search with different terms."
+                ),
             }, ensure_ascii=False)
 
         # Resolve child sessions to their parent — delegation stores detailed
