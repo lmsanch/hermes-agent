@@ -275,6 +275,15 @@ class EmailAdapter(BasePlatformAdapter):
             # Fallback: just clear old entries if sort fails
             self._seen_uids = set(list(self._seen_uids)[-self._seen_uids_max // 2:])
 
+    def _smtp_connect(self):
+        if self._smtp_port == 465:
+            smtp = smtplib.SMTP_SSL(self._smtp_host, self._smtp_port, timeout=30, context=ssl.create_default_context())
+        else:
+            smtp = smtplib.SMTP(self._smtp_host, self._smtp_port, timeout=30)
+            smtp.starttls(context=ssl.create_default_context())
+        smtp.login(self._address, self._password)
+        return smtp
+
     async def connect(self) -> bool:
         """Connect to the IMAP server and start polling for new messages."""
         try:
@@ -297,9 +306,7 @@ class EmailAdapter(BasePlatformAdapter):
 
         try:
             # Test SMTP connection
-            smtp = smtplib.SMTP(self._smtp_host, self._smtp_port, timeout=30)
-            smtp.starttls(context=ssl.create_default_context())
-            smtp.login(self._address, self._password)
+            smtp = self._smtp_connect()
             smtp.quit()
             logger.info("[Email] SMTP connection test passed.")
         except Exception as e:
@@ -380,6 +387,8 @@ class EmailAdapter(BasePlatformAdapter):
                     subject = _decode_header_value(msg.get("Subject", "(no subject)"))
                     message_id = msg.get("Message-ID", "")
                     in_reply_to = msg.get("In-Reply-To", "")
+                    delivered_to = msg.get("Delivered-To", msg.get("To", self._address))
+                    recipient_addr = _extract_email_address(delivered_to) if delivered_to else self._address
                     # Skip automated/noreply senders before any processing
                     msg_headers = dict(msg.items())
                     if _is_automated_sender(sender_addr, msg_headers):
@@ -398,6 +407,7 @@ class EmailAdapter(BasePlatformAdapter):
                         "body": body,
                         "attachments": attachments,
                         "date": msg.get("Date", ""),
+                        "recipient_addr": recipient_addr,
                     })
             finally:
                 try:
@@ -456,6 +466,7 @@ class EmailAdapter(BasePlatformAdapter):
         self._thread_context[sender_addr] = {
             "subject": subject,
             "message_id": msg_data["message_id"],
+            "recipient_addr": msg_data.get("recipient_addr", self._address),
         }
 
         source = self.build_source(
@@ -507,7 +518,9 @@ class EmailAdapter(BasePlatformAdapter):
     ) -> str:
         """Send an email via SMTP. Runs in executor thread."""
         msg = MIMEMultipart()
-        msg["From"] = self._address
+        ctx = self._thread_context.get(to_addr, {})
+        from_addr = ctx.get("recipient_addr", self._address)
+        msg["From"] = from_addr
         msg["To"] = to_addr
 
         # Thread context for reply
@@ -528,10 +541,8 @@ class EmailAdapter(BasePlatformAdapter):
 
         msg.attach(MIMEText(body, "plain", "utf-8"))
 
-        smtp = smtplib.SMTP(self._smtp_host, self._smtp_port, timeout=30)
+        smtp = self._smtp_connect()
         try:
-            smtp.starttls(context=ssl.create_default_context())
-            smtp.login(self._address, self._password)
             smtp.send_message(msg)
         finally:
             try:
@@ -620,10 +631,8 @@ class EmailAdapter(BasePlatformAdapter):
             part.add_header("Content-Disposition", f"attachment; filename={fname}")
             msg.attach(part)
 
-        smtp = smtplib.SMTP(self._smtp_host, self._smtp_port, timeout=30)
+        smtp = self._smtp_connect()
         try:
-            smtp.starttls(context=ssl.create_default_context())
-            smtp.login(self._address, self._password)
             smtp.send_message(msg)
         finally:
             try:
