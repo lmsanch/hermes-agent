@@ -68,6 +68,7 @@ from model_tools import (
 )
 from tools.terminal_tool import cleanup_vm, get_active_env, is_persistent_env
 from tools.tool_result_storage import maybe_persist_tool_result, enforce_turn_budget
+from tools.retrieval_dedup import dedup_retrieval_calls, StallDetector, RETRIEVAL_TOOLS
 from tools.interrupt import set_interrupt as _set_interrupt
 from tools.browser_tool import cleanup_browser
 
@@ -710,6 +711,18 @@ class AIAgent:
         # Shared iteration budget — parent creates, children inherit.
         # Consumed by every LLM turn across parent + all subagents.
         self.iteration_budget = iteration_budget or IterationBudget(max_iterations)
+        self._stall_detector = StallDetector()
+
+        # Inject grounding rule into system prompt (#815 — no confabulation)
+        try:
+            from agent.prompt_builder import _GROUNDING_RULE
+            if _GROUNDING_RULE and hasattr(self, "ephemeral_system_prompt"):
+                self.ephemeral_system_prompt = (
+                    (self.ephemeral_system_prompt or "") + _GROUNDING_RULE
+                )
+        except ImportError:
+            pass
+        self._GROUNDING_INJECTED = True
         self.tool_delay = tool_delay
         self.save_trajectories = save_trajectories
         self.verbose_logging = verbose_logging
@@ -3251,6 +3264,7 @@ class AIAgent:
             "seconds_since_activity": round(elapsed, 1),
             "current_tool": self._current_tool,
             "api_call_count": self._api_call_count,
+            "trace_quality": self._stall_detector.report(),
             "max_iterations": self.max_iterations,
             "budget_used": self.iteration_budget.used,
             "budget_max": self.iteration_budget.max_total,
@@ -7587,6 +7601,11 @@ class AIAgent:
                 function_args = {}
             if not isinstance(function_args, dict):
                 function_args = {}
+            # Check for dedup stub — return merged-message without executing the tool
+            if function_args.get("_hermes_dedup_stub"):
+                function_result = function_args.get("_hermes_dedup_reason", json.dumps({"success": True, "deduped": True}))
+                if not self.quiet_mode:
+                    print(f"  🔄 Deduped: {function_name} (merged with similar query)")
 
             # Checkpoint for file-mutating tools
             if function_name in ("write_file", "patch") and self._checkpoint_mgr.enabled:
@@ -7846,6 +7865,11 @@ class AIAgent:
                 function_args = {}
             if not isinstance(function_args, dict):
                 function_args = {}
+            # Check for dedup stub — return merged-message without executing the tool
+            if function_args.get("_hermes_dedup_stub"):
+                function_result = function_args.get("_hermes_dedup_reason", json.dumps({"success": True, "deduped": True}))
+                if not self.quiet_mode:
+                    print(f"  🔄 Deduped: {function_name} (merged with similar query)")
 
             # Check plugin hooks for a block directive before executing.
             _block_msg: Optional[str] = None
@@ -8765,6 +8789,15 @@ class AIAgent:
                     self.step_callback(api_call_count, prev_tools)
                 except Exception as _step_err:
                     logger.debug("step_callback error (iteration %s): %s", api_call_count, _step_err)
+
+            # Adaptive budget: check for stall (no useful progress).
+            # When the agent spins on repeated failed/redundant tool calls,
+            # inject a clarifying question instead of burning more iterations.
+            if self._stall_detector.should_intervene():
+                intervention = self._stall_detector.intervention_message()
+                messages.append({"role": "user", "content": intervention})
+                if not self.quiet_mode:
+                    self._safe_print(f"\n⚠️  Stall detected — injecting clarifying question (useful rate: {self._stall_detector.useful_rate():.0%})")
 
             # Track tool-calling iterations for skill nudge.
             # Counter resets whenever skill_manage is actually used.
@@ -10841,6 +10874,12 @@ class AIAgent:
                     assistant_message.tool_calls = self._deduplicate_tool_calls(
                         assistant_message.tool_calls
                     )
+                    # Dedup near-synonym retrieval queries (Jaccard > 0.6).
+                    # Collapses overlapping session_search/web_search/etc. into
+                    # one broader query per cluster. See toryx-private#817.
+                    assistant_message.tool_calls, _retrieval_dedup_removed = dedup_retrieval_calls(
+                        assistant_message.tool_calls
+                    )
 
                     assistant_msg = self._build_assistant_message(assistant_message, finish_reason)
                     
@@ -11375,6 +11414,23 @@ class AIAgent:
                     if _tcs and isinstance(_tcs[0], dict):
                         _last_tool_name = _tcs[-1].get("function", {}).get("name")
                     break
+
+        # Trace-quality report (retrieval dedup + stall stats)
+        _stall_report = self._stall_detector.report()
+        _retrieval_pct = (
+            round(100 * _stall_report["retrieval_calls"] / _stall_report["total_tool_calls"], 1)
+            if _stall_report["total_tool_calls"] > 0 else 0
+        )
+        logger.info(
+            "Trace quality: total=%d retrieval=%d (%.1f%%) useful=%d (%.0f%%) deduped=%d intervened=%s",
+            _stall_report["total_tool_calls"],
+            _stall_report["retrieval_calls"],
+            _retrieval_pct,
+            _stall_report["useful_calls"],
+            _stall_report["useful_rate"] * 100,
+            _stall_report["deduped_calls"],
+            _stall_report["intervened"],
+        )
 
         _turn_tool_count = sum(
             1 for m in messages

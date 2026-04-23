@@ -135,7 +135,11 @@ DANGEROUS_PATTERNS = [
     # Script execution after chmod +x — catches the two-step pattern where
     # a script is first made executable then immediately run. The script
     # content may contain dangerous commands that individual patterns miss.
+    
+    # Reading .env or secret files — requires its own approval category
+    (r'\b(cat|head|tail|less|more|grep|rg|find|ls|file|stat|read|nano|vi|vim|cat|bat)\b.*\.env\b', "reading .env or secret file"),
     (r'\bchmod\s+\+x\b.*[;&|]+\s*\./', "chmod +x followed by immediate execution"),
+
 ]
 
 
@@ -197,6 +201,69 @@ def detect_dangerous_command(command: str) -> tuple:
             return (True, pattern_key, description)
     return (False, None, None)
 
+
+
+
+# =========================================================================
+# Approval categories — narrow scoping for authorization
+# =========================================================================
+# Each category requires its own approval event. A "once" or "session"
+# approval for one category does NOT auto-authorize another.
+# See toryx-private#816.
+
+_APPROVAL_CATEGORIES = {
+    "command_execution": "Executing flagged shell commands",
+    "filesystem_outside_project": "Reading/writing files outside the project root",
+    "env_read": "Reading .env or secret-containing files",
+    "subagent_delegation": "Delegating to subagents (consult_colleague, delegate_task)",
+}
+
+# Map dangerous pattern descriptions to categories
+_PATTERN_CATEGORY_MAP = {
+    "pipe remote content to shell": "command_execution",
+    "shell command via -c/-lc flag": "command_execution",
+    "script execution via -e/-c flag": "command_execution",
+    "script execution via heredoc": "command_execution",
+    "recursive delete": "command_execution",
+    "delete in root path": "command_execution",
+    "overwrite system config": "filesystem_outside_project",
+    "overwrite system file via tee": "filesystem_outside_project",
+    "overwrite system file via redirection": "filesystem_outside_project",
+    "copy/move file into /etc/": "filesystem_outside_project",
+    "in-place edit of system config": "filesystem_outside_project",
+}
+
+
+def _category_for_pattern(pattern_key: str) -> str:
+    """Return the approval category for a given pattern description."""
+    # Direct map
+    if pattern_key in _PATTERN_CATEGORY_MAP:
+        return _PATTERN_CATEGORY_MAP[pattern_key]
+    # Tirith findings
+    if pattern_key.startswith("tirith:"):
+        return "command_execution"
+    # Default: command execution
+    return "command_execution"
+
+
+def _category_approved(session_key: str, category: str) -> bool:
+    """Check if an approval category is approved for this session.
+    Direct key lookup — no recursive category resolution.
+    """
+    cat_key = f"__category__:{category}"
+    with _lock:
+        if cat_key in _permanent_approved:
+            return True
+        session_approvals = _session_approved.get(session_key, set())
+        return cat_key in session_approvals
+
+
+def _approve_category(session_key: str, category: str, scope: str = "session") -> None:
+    """Mark an approval category as approved for this session."""
+    approve_session(session_key, f"__category__:{category}")
+    if scope == "always":
+        approve_permanent(f"__category__:{category}")
+        save_permanent_allowlist(_permanent_approved)
 
 # =========================================================================
 # Per-session approval state (thread-safe)
@@ -346,15 +413,25 @@ def is_current_session_yolo_enabled() -> bool:
 def is_approved(session_key: str, pattern_key: str) -> bool:
     """Check if a pattern is approved (session-scoped or permanent).
 
-    Accept both the current canonical key and the legacy regex-derived key so
-    existing command_allowlist entries continue to work after key migrations.
+    Also checks category-level approvals — a session approval for
+    "pipe remote content to shell" does NOT auto-authorize reading .env.
+    See toryx-private#816.
     """
     aliases = _approval_key_aliases(pattern_key)
     with _lock:
         if any(alias in _permanent_approved for alias in aliases):
             return True
         session_approvals = _session_approved.get(session_key, set())
-        return any(alias in session_approvals for alias in aliases)
+        if any(alias in session_approvals for alias in aliases):
+            # Pattern approved — but also check category scope.
+            # If this specific pattern was approved, it's fine.
+            return True
+        # Check category-level approval (narrow scope)
+        category = _category_for_pattern(pattern_key)
+        cat_key = f"__category__:{category}"
+        if cat_key in session_approvals or cat_key in _permanent_approved:
+            return True
+        return False
 
 
 def approve_permanent(pattern_key: str):
@@ -892,18 +969,26 @@ def check_all_command_guards(command: str, env_type: str,
                 }
 
             # User approved — persist based on scope (same logic as CLI)
+            # Also log which approval authorized this call (audit trail).
+            _audit_info = []
             for key, _, is_tirith in warnings:
+                category = _category_for_pattern(key)
                 if choice == "session" or (choice == "always" and is_tirith):
                     approve_session(session_key, key)
+                    _approve_category(session_key, category, scope="session")
                 elif choice == "always":
                     approve_session(session_key, key)
-                    approve_permanent(key)
-                    save_permanent_allowlist(_permanent_approved)
-                # choice == "once": no persistence — command allowed this
-                # single time only, matching the CLI's behavior.
+                    _approve_category(session_key, category, scope="always")
+                else:
+                    # "once" — only approve this specific pattern+category once
+                    approve_session(session_key, key)
+                _audit_info.append(f"{key} (category={category}, scope={choice})")
+
+            logger.info("Approval granted: %s", "; ".join(_audit_info))
 
             return {"approved": True, "message": None,
-                    "user_approved": True, "description": combined_desc}
+                    "user_approved": True, "description": combined_desc,
+                    "audit": _audit_info}
 
         # Fallback: no gateway callback registered (e.g. cron, batch).
         # Return approval_required for backward compat.
