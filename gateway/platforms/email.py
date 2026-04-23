@@ -416,6 +416,17 @@ class EmailAdapter(BasePlatformAdapter):
         if sender_addr == self._address.lower():
             return
 
+        # Drop senders explicitly blocklisted via EMAIL_IGNORED_SENDERS.
+        # Defense in depth against intra-fleet email loops where two
+        # gateways configured with each other as unauthorized senders
+        # ping-pong busy-ack notifications forever.
+        ignored_raw = os.getenv('EMAIL_IGNORED_SENDERS', '').strip()
+        if ignored_raw and sender_addr:
+            ignored_set = {a.strip().lower() for a in ignored_raw.split(',') if a.strip()}
+            if sender_addr.lower() in ignored_set:
+                logger.info('[Email] Ignoring blocklisted sender: %s', sender_addr)
+                return
+
         # Never reply to automated senders
         if _is_automated_sender(sender_addr, {}):
             logger.debug("[Email] Dropping automated sender at dispatch: %s", sender_addr)
