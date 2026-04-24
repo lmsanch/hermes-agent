@@ -1009,6 +1009,49 @@ class GatewayRunner:
         route["request_overrides"] = overrides
         return route
 
+    def _maybe_language_hint(self, user_message: str) -> str:
+        """Gateway-side wrapper for ``agent.language_hint.apply_hint_if_enabled``.
+
+        Thin delegate so the three ``run_conversation()`` call sites can
+        pre-process the user message uniformly. Behavior is env-gated
+        and default-off — see ``apply_hint_if_enabled`` docstring.
+        """
+        try:
+            from agent.language_hint import apply_hint_if_enabled
+            return apply_hint_if_enabled(user_message)
+        except Exception as exc:
+            logger.warning(
+                "language hint failed, passing message through: %s", exc
+            )
+            return user_message
+
+    def _record_turn_outcome(self, turn_route: dict, result) -> None:
+        """Record a Beta-Bernoulli outcome when the turn used a TS arm.
+
+        No-op when ``turn_route`` is from cheap_model mode, the primary
+        route fallback, or any non-TS code path — those never set
+        ``arm_key`` / ``state_path``. Exceptions are swallowed (with a
+        warning) because a failed outcome write must not propagate up
+        into the gateway.
+        """
+        arm_key = turn_route.get("arm_key") if turn_route else None
+        state_path = turn_route.get("state_path") if turn_route else None
+        if not arm_key or not state_path:
+            return
+        try:
+            from agent.ts_state import classify_outcome, record_outcome
+            from pathlib import Path
+
+            success = classify_outcome(result)
+            record_outcome(arm_key, success, Path(state_path))
+            logger.info(
+                "TS outcome recorded: arm=%s success=%s", arm_key, success
+            )
+        except Exception as exc:
+            logger.warning(
+                "TS record_outcome failed for arm=%s: %s", arm_key, exc
+            )
+
     async def _handle_adapter_fatal_error(self, adapter: BasePlatformAdapter) -> None:
         """React to an adapter failure after startup.
 
@@ -5872,13 +5915,14 @@ class GatewayRunner:
                 )
                 try:
                     return agent.run_conversation(
-                        user_message=prompt,
+                        user_message=self._maybe_language_hint(prompt),
                         task_id=task_id,
                     )
                 finally:
                     self._cleanup_agent_resources(agent)
 
             result = await self._run_in_executor_with_context(run_sync)
+            self._record_turn_outcome(turn_route, result)
 
             response = result.get("final_response", "") if result else ""
             if not response and result and result.get("error"):
@@ -6056,7 +6100,7 @@ class GatewayRunner:
                 )
                 try:
                     return agent.run_conversation(
-                        user_message=btw_prompt,
+                        user_message=self._maybe_language_hint(btw_prompt),
                         conversation_history=history_snapshot,
                         task_id=task_id,
                     )
@@ -6064,6 +6108,7 @@ class GatewayRunner:
                     self._cleanup_agent_resources(agent)
 
             result = await self._run_in_executor_with_context(run_sync)
+            self._record_turn_outcome(turn_route, result)
 
             response = (result.get("final_response") or "") if result else ""
             if not response and result and result.get("error"):
@@ -9190,11 +9235,12 @@ class GatewayRunner:
             _approval_session_token = set_current_session_key(_approval_session_key)
             register_gateway_notify(_approval_session_key, _approval_notify_sync)
             try:
-                result = agent.run_conversation(message, conversation_history=agent_history, task_id=session_id)
+                result = agent.run_conversation(self._maybe_language_hint(message), conversation_history=agent_history, task_id=session_id)
             finally:
                 unregister_gateway_notify(_approval_session_key)
                 reset_current_session_key(_approval_session_token)
             result_holder[0] = result
+            self._record_turn_outcome(turn_route, result)
 
             # Signal the stream consumer that the agent is done
             if _stream_consumer is not None:

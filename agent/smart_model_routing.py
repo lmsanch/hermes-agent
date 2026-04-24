@@ -1,12 +1,74 @@
-"""Helpers for optional cheap-vs-strong model routing."""
+"""Helpers for optional cheap-vs-strong model routing.
+
+Supports two routing modes (selected via ``routing_config.mode``):
+
+- ``cheap_model`` (or absent) — keyword-based routing for simple turns.
+- ``thompson_sampling`` — Beta-Bernoulli bandit across a model pool.
+
+Thompson Sampling mode samples one model per user turn from a configurable
+pool of arms.  The sampled model is then ``turn-sticky``: the gateway caches
+it in ``AIAgent.model`` for the remainder of the turn so every LLM call
+within that turn uses the same model.  Outcomes (success/failure) are
+recorded back to a persistent JSON state file so the Beta posteriors
+converge toward the true best arm over time.
+
+Kill-switches (env vars):
+
+- ``HERMES_TS_DISABLED=true`` — completely disables TS; returns None.
+- ``HERMES_TS_DRY_RUN=true`` — samples and logs but does not route or
+  mutate state; returns None (falls through to primary).
+
+Configuration example (``config.yaml`` ``smart_model_routing`` section)::
+
+    smart_model_routing:
+      mode: thompson_sampling
+      thompson_sampling:
+        # Persistent state file (default: ~/.hermes/ts_hermes_mds.json)
+        # state_path: /path/to/ts_state.json
+        arms:
+          - name: fireworks-glm5
+            provider: fireworks
+            model: accounts/fireworks/models/glm-5
+            api_key_env: FIREWORKS_API_KEY   # optional; resolved via env
+            base_url: https://api.fireworks.ai/inference/v1  # optional
+          - name: anthropic-sonnet
+            provider: anthropic
+            model: claude-sonnet-4-6
+            api_key_env: ANTHROPIC_API_KEY
+          - name: qwen3-235b
+            provider: together
+            model: Qwen/Qwen3-235B-A22B-Instruct-2507-tput
+            api_key_env: TOGETHER_API_KEY
+
+State file schema (``ts_hermes_mds.json``)::
+
+    {
+      "arms": {
+        "fireworks-glm5": {"a": 1.0, "b": 1.0, "wins": 0, "losses": 0, "last_updated": ""},
+        "anthropic-sonnet": {"a": 1.0, "b": 1.0, "wins": 0, "losses": 0, "last_updated": ""}
+      },
+      "version": 1
+    }
+
+Arm resolution: when TS picks an arm, the returned route dict has the exact
+shape the gateway expects: ``{model, runtime, label, signature}``.  Provider
+credentials are resolved via ``resolve_runtime_provider``.  If credential
+resolution fails for the chosen arm (missing API key, no custom_providers
+entry), the function logs a warning and returns ``None`` so the gateway falls
+back to the primary model.
+"""
 
 from __future__ import annotations
 
+import logging
 import os
 import re
+from pathlib import Path
 from typing import Any, Dict, Optional
 
 from utils import is_truthy_value
+
+logger = logging.getLogger(__name__)
 
 _COMPLEX_KEYWORDS = {
     "debug",
@@ -59,7 +121,9 @@ def _coerce_int(value: Any, default: int) -> int:
         return default
 
 
-def choose_cheap_model_route(user_message: str, routing_config: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+def choose_cheap_model_route(
+    user_message: str, routing_config: Optional[Dict[str, Any]]
+) -> Optional[Dict[str, Any]]:
     """Return the configured cheap-model route when a message looks simple.
 
     Conservative by design: if the message has signs of code/tool/debugging/
@@ -107,34 +171,161 @@ def choose_cheap_model_route(user_message: str, routing_config: Optional[Dict[st
     return route
 
 
-def resolve_turn_route(user_message: str, routing_config: Optional[Dict[str, Any]], primary: Dict[str, Any]) -> Dict[str, Any]:
+def _primary_route(primary: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "model": primary.get("model"),
+        "runtime": {
+            "api_key": primary.get("api_key"),
+            "base_url": primary.get("base_url"),
+            "provider": primary.get("provider"),
+            "api_mode": primary.get("api_mode"),
+            "command": primary.get("command"),
+            "args": list(primary.get("args") or []),
+            "credential_pool": primary.get("credential_pool"),
+        },
+        "label": None,
+        "signature": (
+            primary.get("model"),
+            primary.get("provider"),
+            primary.get("base_url"),
+            primary.get("api_mode"),
+            primary.get("command"),
+            tuple(primary.get("args") or ()),
+        ),
+    }
+
+
+def choose_thompson_sampling_route(
+    user_message: str,
+    routing_config: Optional[Dict[str, Any]],
+    primary: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+    """Return a TS-sampled route, or None if TS is disabled/misconfigured.
+
+    Honors kill-switches:
+      - env HERMES_TS_DISABLED=true → returns None (fall through to primary).
+      - env HERMES_TS_DRY_RUN=true → samples + logs but returns None.
+
+    Each arm is a dict with keys: name, provider, model, api_key (optional,
+    resolves via env by default), base_url (optional), api_mode (optional).
+    """
+    if os.getenv("HERMES_TS_DISABLED", "").strip().lower() in ("true", "1", "yes"):
+        return None
+
+    cfg = routing_config or {}
+    ts_cfg = cfg.get("thompson_sampling") or {}
+    arms = ts_cfg.get("arms") or []
+    if not isinstance(arms, list) or len(arms) < 2:
+        return None
+
+    arm_keys = [str(a.get("name") or a.get("model") or "") for a in arms]
+    if not all(arm_keys):
+        return None
+
+    from hermes_constants import get_hermes_home
+
+    state_path = Path(
+        ts_cfg.get("state_path") or str(get_hermes_home() / "ts_hermes_mds.json")
+    )
+
+    from agent.ts_state import thompson_sample
+
+    dry_run = os.getenv("HERMES_TS_DRY_RUN", "").strip().lower() in ("true", "1", "yes")
+
+    chosen_key = thompson_sample(arm_keys, state_path)
+
+    if dry_run:
+        logger.info("TS dry run: sampled %s but not routing", chosen_key)
+        return None
+
+    chosen_arm = None
+    for arm in arms:
+        key = str(arm.get("name") or arm.get("model") or "")
+        if key == chosen_key:
+            chosen_arm = arm
+            break
+    if not chosen_arm:
+        return None
+
+    from hermes_cli.runtime_provider import resolve_runtime_provider
+
+    explicit_api_key = None
+    api_key_env = str(chosen_arm.get("api_key_env") or "").strip()
+    if api_key_env:
+        explicit_api_key = os.getenv(api_key_env) or None
+
+    try:
+        runtime = resolve_runtime_provider(
+            requested=chosen_arm.get("provider"),
+            explicit_api_key=explicit_api_key,
+            explicit_base_url=chosen_arm.get("base_url"),
+        )
+    except Exception:
+        logger.warning(
+            "TS arm %s: credential resolution failed, falling back to primary",
+            chosen_key,
+        )
+        return None
+
+    if not runtime.get("api_key"):
+        logger.warning(
+            "TS arm %s: no api_key resolved, falling back to primary", chosen_key
+        )
+        return None
+
+    return {
+        "model": chosen_arm.get("model"),
+        "runtime": {
+            "api_key": runtime.get("api_key"),
+            "base_url": runtime.get("base_url"),
+            "provider": runtime.get("provider"),
+            "api_mode": runtime.get("api_mode"),
+            "command": runtime.get("command"),
+            "args": list(runtime.get("args") or []),
+            "credential_pool": runtime.get("credential_pool"),
+        },
+        "label": f"thompson sampling → {chosen_arm.get('model')} ({runtime.get('provider')})",
+        "signature": (
+            chosen_arm.get("model"),
+            runtime.get("provider"),
+            runtime.get("base_url"),
+            runtime.get("api_mode"),
+            runtime.get("command"),
+            tuple(runtime.get("args") or ()),
+        ),
+        "arm_key": chosen_key,
+        "state_path": str(state_path),
+    }
+
+
+def resolve_turn_route(
+    user_message: str, routing_config: Optional[Dict[str, Any]], primary: Dict[str, Any]
+) -> Dict[str, Any]:
     """Resolve the effective model/runtime for one turn.
 
     Returns a dict with model/runtime/signature/label fields.
+    Dispatches on ``routing_config.mode``:
+      - ``"thompson_sampling"`` → ``choose_thompson_sampling_route``
+      - ``"cheap_model"`` or absent → ``choose_cheap_model_route``
     """
+    mode = (routing_config or {}).get("mode", "cheap_model")
+
+    if mode == "thompson_sampling":
+        route = choose_thompson_sampling_route(user_message, routing_config, primary)
+        if route:
+            return {
+                "model": route["model"],
+                "runtime": route["runtime"],
+                "label": route["label"],
+                "signature": route["signature"],
+                "arm_key": route.get("arm_key"),
+                "state_path": route.get("state_path"),
+            }
+        return _primary_route(primary)
+
     route = choose_cheap_model_route(user_message, routing_config)
     if not route:
-        return {
-            "model": primary.get("model"),
-            "runtime": {
-                "api_key": primary.get("api_key"),
-                "base_url": primary.get("base_url"),
-                "provider": primary.get("provider"),
-                "api_mode": primary.get("api_mode"),
-                "command": primary.get("command"),
-                "args": list(primary.get("args") or []),
-                "credential_pool": primary.get("credential_pool"),
-            },
-            "label": None,
-            "signature": (
-                primary.get("model"),
-                primary.get("provider"),
-                primary.get("base_url"),
-                primary.get("api_mode"),
-                primary.get("command"),
-                tuple(primary.get("args") or ()),
-            ),
-        }
+        return _primary_route(primary)
 
     from hermes_cli.runtime_provider import resolve_runtime_provider
 
@@ -150,27 +341,7 @@ def resolve_turn_route(user_message: str, routing_config: Optional[Dict[str, Any
             explicit_base_url=route.get("base_url"),
         )
     except Exception:
-        return {
-            "model": primary.get("model"),
-            "runtime": {
-                "api_key": primary.get("api_key"),
-                "base_url": primary.get("base_url"),
-                "provider": primary.get("provider"),
-                "api_mode": primary.get("api_mode"),
-                "command": primary.get("command"),
-                "args": list(primary.get("args") or []),
-                "credential_pool": primary.get("credential_pool"),
-            },
-            "label": None,
-            "signature": (
-                primary.get("model"),
-                primary.get("provider"),
-                primary.get("base_url"),
-                primary.get("api_mode"),
-                primary.get("command"),
-                tuple(primary.get("args") or ()),
-            ),
-        }
+        return _primary_route(primary)
 
     return {
         "model": route.get("model"),
