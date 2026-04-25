@@ -9,6 +9,7 @@ audit DB, daily cap), this wrapper is replaced with no caller-side change.
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 import subprocess
@@ -60,7 +61,7 @@ CONSULT_COLLEAGUE_SCHEMA = {
 }
 
 
-def consult_colleague(agent: str, query: str, **_: Any) -> Dict[str, Any]:
+def consult_colleague(agent: str, query: str, **_: Any) -> str:
     agent = (agent or "").strip().lower()
     agent = _PROFILE_ALIASES.get(agent, agent)
     if agent not in _VALID_PROFILES:
@@ -128,12 +129,12 @@ def consult_colleague(agent: str, query: str, **_: Any) -> Dict[str, Any]:
             "Retry once; if still empty, refuse."
         )
 
-    return {
+    return json.dumps({
         "colleague": agent,
         "answer": answer,
         "latency_ms": latency_ms,
         "terminal_status": "ok",
-    }
+    })
 
 
 registry.register(
