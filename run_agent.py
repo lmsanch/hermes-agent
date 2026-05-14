@@ -522,6 +522,36 @@ def _sanitize_messages_non_ascii(messages: list) -> bool:
     return found
 
 
+def _normalize_messages_for_groq(messages: list) -> list:
+    """Collapse content-block lists to plain strings for Groq compatibility.
+
+    Groq's chat completions API requires ``role=tool`` and ``role=user``
+    message content to be a string, not a list of content blocks.
+    The OpenAI Python SDK wraps string content into
+    ``[{"type": "text", "text": "..."}]`` before serializing; this
+    normalizer reverses that transformation at the application level
+    so the SDK sends strings to Groq.
+
+    This is a no-op when content is already a string or None.
+    """
+    result = []
+    for msg in messages:
+        if not isinstance(msg, dict):
+            result.append(msg)
+            continue
+        content = msg.get("content")
+        if isinstance(content, list):
+            parts = []
+            for block in content:
+                if isinstance(block, dict):
+                    parts.append(block.get("text", ""))
+                else:
+                    parts.append(str(block))
+            msg = {**msg, "content": "\n".join(p for p in parts if p)}
+        result.append(msg)
+    return result
+
+
 def _sanitize_tools_non_ascii(tools: list) -> bool:
     """Strip non-ASCII characters from tool payloads in-place."""
     return _sanitize_structure_non_ascii(tools)
@@ -6765,6 +6795,12 @@ class AIAgent:
                 # Already a deepcopy — transform in place to avoid a second deepcopy.
                 self._qwen_prepare_chat_messages_inplace(sanitized_messages)
 
+        # Groq requires content to be a plain string, not a list of content
+        # blocks.  The OpenAI SDK wraps strings into [{type: text, text: ...}]
+        # before serializing; this reverses that for Groq providers.
+        if "groq" in self._base_url_lower or self.provider == "groq":
+            sanitized_messages = _normalize_messages_for_groq(sanitized_messages)
+
         # GPT-5 and Codex models respond better to 'developer' than 'system'
         # for instruction-following.  Swap the role at the API boundary so
         # internal message representation stays uniform ("system").
@@ -7287,9 +7323,12 @@ class AIAgent:
                 )
                 response = self._anthropic_messages_create(ant_kwargs)
             elif not _aux_available:
+                _flush_messages = api_messages
+                if "groq" in self._base_url_lower or self.provider == "groq":
+                    _flush_messages = _normalize_messages_for_groq(_flush_messages)
                 api_kwargs = {
                     "model": self.model,
-                    "messages": api_messages,
+                    "messages": _flush_messages,
                     "tools": [memory_tool_def],
                     "temperature": 0.3,
                     **self._max_tokens_param(5120),
@@ -8283,9 +8322,12 @@ class AIAgent:
                 assistant_message, _ = self._normalize_codex_response(summary_response)
                 final_response = (assistant_message.content or "").strip() if assistant_message else ""
             else:
+                _summary_messages = api_messages
+                if "groq" in self._base_url_lower or self.provider == "groq":
+                    _summary_messages = _normalize_messages_for_groq(_summary_messages)
                 summary_kwargs = {
                     "model": self.model,
-                    "messages": api_messages,
+                    "messages": _summary_messages,
                 }
                 if self.max_tokens is not None:
                     summary_kwargs.update(self._max_tokens_param(self.max_tokens))
@@ -8348,9 +8390,12 @@ class AIAgent:
                     _retry_msg, _ = _nar2(retry_response, strip_tool_prefix=self._is_anthropic_oauth)
                     final_response = (_retry_msg.content or "").strip()
                 else:
+                    _retry_messages = api_messages
+                    if "groq" in self._base_url_lower or self.provider == "groq":
+                        _retry_messages = _normalize_messages_for_groq(_retry_messages)
                     summary_kwargs = {
                         "model": self.model,
-                        "messages": api_messages,
+                        "messages": _retry_messages,
                     }
                     if self.max_tokens is not None:
                         summary_kwargs.update(self._max_tokens_param(self.max_tokens))
