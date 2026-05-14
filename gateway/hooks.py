@@ -163,8 +163,45 @@ class HookRegistry:
         for fn in handlers:
             try:
                 result = fn(event_type, context)
-                # Support both sync and async handlers
                 if asyncio.iscoroutine(result):
                     await result
             except Exception as e:
                 print(f"[hooks] Error in handler for '{event_type}': {e}", flush=True)
+
+    async def emit_with_result(
+        self,
+        event_type: str,
+        context: Optional[Dict[str, Any]] = None,
+        field: str = "response",
+    ) -> Optional[Any]:
+        """
+        Like emit(), but if a handler returns a non-None value for the
+        given context field, that value replaces the original. Last
+        writer wins.
+
+        Use for hooks that need to modify gateway data (e.g., response
+        text at agent:end).
+        """
+        if context is None:
+            context = {}
+
+        current_value = context.get(field)
+
+        handlers = list(self._handlers.get(event_type, []))
+        if ":" in event_type:
+            base = event_type.split(":")[0]
+            wildcard_key = f"{base}:*"
+            handlers.extend(self._handlers.get(wildcard_key, []))
+
+        for fn in handlers:
+            try:
+                result = fn(event_type, context)
+                if asyncio.iscoroutine(result):
+                    result = await result
+                if result is not None:
+                    current_value = result
+                    context[field] = current_value
+            except Exception as e:
+                print(f"[hooks] Error in handler for '{event_type}': {e}", flush=True)
+
+        return current_value

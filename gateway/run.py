@@ -4179,11 +4179,18 @@ class GatewayRunner:
                         display_reasoning = last_reasoning.strip()
                     response = f"💭 **Reasoning:**\n```\n{display_reasoning}\n```\n\n{response}"
 
-            # Emit agent:end hook
-            await self.hooks.emit("agent:end", {
-                **hook_ctx,
-                "response": (response or "")[:500],
-            })
+            # Emit agent:end hook (response-modifying hooks can replace response)
+            _guarded_response = await self.hooks.emit_with_result(
+                "agent:end",
+                {**hook_ctx, "response": response or ""},
+                field="response",
+            )
+            if _guarded_response is not None and _guarded_response != (response or ""):
+                response = _guarded_response
+                logger.info(
+                    "response-modifying hook changed response (session %s)",
+                    session_entry.session_id if session_entry else "?",
+                )
             
             # Check for pending process watchers (check_interval on background processes)
             try:
