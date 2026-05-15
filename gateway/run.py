@@ -1746,49 +1746,6 @@ class GatewayRunner:
         route["request_overrides"] = overrides or {}
         return route
 
-    def _maybe_language_hint(self, user_message: str) -> str:
-        """Gateway-side wrapper for ``agent.language_hint.apply_hint_if_enabled``.
-
-        Thin delegate so the three ``run_conversation()`` call sites can
-        pre-process the user message uniformly. Behavior is env-gated
-        and default-off — see ``apply_hint_if_enabled`` docstring.
-        """
-        try:
-            from agent.language_hint import apply_hint_if_enabled
-            return apply_hint_if_enabled(user_message)
-        except Exception as exc:
-            logger.warning(
-                "language hint failed, passing message through: %s", exc
-            )
-            return user_message
-
-    def _record_turn_outcome(self, turn_route: dict, result) -> None:
-        """Record a Beta-Bernoulli outcome when the turn used a TS arm.
-
-        No-op when ``turn_route`` is from cheap_model mode, the primary
-        route fallback, or any non-TS code path — those never set
-        ``arm_key`` / ``state_path``. Exceptions are swallowed (with a
-        warning) because a failed outcome write must not propagate up
-        into the gateway.
-        """
-        arm_key = turn_route.get("arm_key") if turn_route else None
-        state_path = turn_route.get("state_path") if turn_route else None
-        if not arm_key or not state_path:
-            return
-        try:
-            from agent.ts_state import classify_outcome, record_outcome
-            from pathlib import Path
-
-            success = classify_outcome(result)
-            record_outcome(arm_key, success, Path(state_path))
-            logger.info(
-                "TS outcome recorded: arm=%s success=%s", arm_key, success
-            )
-        except Exception as exc:
-            logger.warning(
-                "TS record_outcome failed for arm=%s: %s", arm_key, exc
-            )
-
     async def _handle_adapter_fatal_error(self, adapter: BasePlatformAdapter) -> None:
         """React to an adapter failure after startup.
 
@@ -2294,22 +2251,6 @@ class GatewayRunner:
         merge_pending_message_event(adapter._pending_messages, session_key, event)
 
     async def _handle_active_session_busy_message(self, event: MessageEvent, session_key: str) -> bool:
-<<<<<<< HEAD
-        # Auth check FIRST: unauthorized senders must never trigger an
-        # outbound reply, including the busy-ack. Without this, two
-        # gateways configured with each other's address as unauthorized
-        # can ping-pong busy-acks forever (Toryx 2026-04-19 incident:
-        # 487 emails between two MD profiles in 20 min). Internal events
-        # bypass auth as elsewhere in the codebase.
-        if not getattr(event, 'internal', False) and event.source.user_id is not None:
-            if not self._is_user_authorized(event.source):
-                logger.info(
-                    'Suppressed busy-ack to unauthorized sender %s on %s',
-                    event.source.user_id,
-                    event.source.platform.value if event.source.platform else 'unknown',
-                )
-                return True  # consume event silently
-=======
         # --- Authorization gate (#17775) ---
         # The cold path (_handle_message) checks _is_user_authorized before
         # creating a session.  The busy path must enforce the same check;
@@ -2325,7 +2266,6 @@ class GatewayRunner:
                 session_key,
             )
             return True  # handled (silently dropped); do not fall through
->>>>>>> v2026.5.7
 
         # --- Draining case (gateway restarting/stopping) ---
         if self._draining:
@@ -6696,18 +6636,6 @@ class GatewayRunner:
                 await self._deliver_platform_notice(source, notice)
         
         # -----------------------------------------------------------------
-        # Voice input brevity — when user sends a voice message, the
-        # response will be read aloud via TTS. Keep answers concise and
-        # conversational (2-3 sentences max). No markdown, no lists.
-        # -----------------------------------------------------------------
-        if event.message_type == MessageType.VOICE:
-            context_prompt += (                "\n\n[System note: The user sent a voice message. Your reply "
-                "will be read aloud via text-to-speech. Keep it brief, "
-                "conversational, and spoken-style — 2-3 sentences max. "
-                "No markdown, no bullet lists, no code blocks. Answer as "
-                "if talking on a walkie-talkie.]"
-            )
-        # -----------------------------------------------------------------
         # Voice channel awareness — inject current voice channel state
         # into context so the agent knows who is in the channel and who
         # is speaking, without needing a separate tool call.
@@ -6871,20 +6799,6 @@ class GatewayRunner:
                         display_reasoning = last_reasoning.strip()
                     response = f"💭 **Reasoning:**\n```\n{display_reasoning}\n```\n\n{response}"
 
-<<<<<<< HEAD
-            # Emit agent:end hook (response-modifying hooks can replace response)
-            _guarded_response = await self.hooks.emit_with_result(
-                "agent:end",
-                {**hook_ctx, "response": response or ""},
-                field="response",
-            )
-            if _guarded_response is not None and _guarded_response != (response or ""):
-                response = _guarded_response
-                logger.info(
-                    "response-modifying hook changed response (session %s)",
-                    session_entry.session_id if session_entry else "?",
-                )
-=======
             # Runtime-metadata footer — only on the FINAL message of the turn.
             # Off by default (display.runtime_footer.enabled=false).  When
             # streaming already delivered the body, we can't mutate the sent
@@ -6911,7 +6825,6 @@ class GatewayRunner:
                 **hook_ctx,
                 "response": (response or "")[:500],
             })
->>>>>>> v2026.5.7
             
             # Check for pending process watchers (check_interval on background processes)
             try:
@@ -9362,14 +9275,13 @@ class GatewayRunner:
                 )
                 try:
                     return agent.run_conversation(
-                        user_message=self._maybe_language_hint(prompt),
+                        user_message=prompt,
                         task_id=task_id,
                     )
                 finally:
                     self._cleanup_agent_resources(agent)
 
             result = await self._run_in_executor_with_context(run_sync)
-            self._record_turn_outcome(turn_route, result)
 
             response = result.get("final_response", "") if result else ""
             if not response and result and result.get("error"):
@@ -9437,178 +9349,6 @@ class GatewayRunner:
             except Exception:
                 pass
 
-<<<<<<< HEAD
-    async def _handle_btw_command(self, event: MessageEvent) -> str:
-        """Handle /btw <question> — ephemeral side question in the same chat."""
-        question = event.get_command_args().strip()
-        if not question:
-            return (
-                "Usage: /btw <question>\n"
-                "Example: /btw what module owns session title sanitization?\n\n"
-                "Answers using session context. No tools, not persisted."
-            )
-
-        source = event.source
-        session_key = self._session_key_for_source(source)
-
-        # Guard: one /btw at a time per session
-        existing = getattr(self, "_active_btw_tasks", {}).get(session_key)
-        if existing and not existing.done():
-            return "A /btw is already running for this chat. Wait for it to finish."
-
-        if not hasattr(self, "_active_btw_tasks"):
-            self._active_btw_tasks: dict = {}
-
-        import uuid as _uuid
-        task_id = f"btw_{datetime.now().strftime('%H%M%S')}_{_uuid.uuid4().hex[:6]}"
-        _task = asyncio.create_task(self._run_btw_task(question, source, session_key, task_id))
-        self._background_tasks.add(_task)
-        self._active_btw_tasks[session_key] = _task
-
-        def _cleanup(task):
-            self._background_tasks.discard(task)
-            if self._active_btw_tasks.get(session_key) is task:
-                self._active_btw_tasks.pop(session_key, None)
-
-        _task.add_done_callback(_cleanup)
-
-        preview = question[:60] + ("..." if len(question) > 60 else "")
-        return f'💬 /btw: "{preview}"\nReply will appear here shortly.'
-
-    async def _run_btw_task(
-        self, question: str, source, session_key: str, task_id: str,
-    ) -> None:
-        """Execute an ephemeral /btw side question and deliver the answer."""
-        from run_agent import AIAgent
-
-        adapter = self.adapters.get(source.platform)
-        if not adapter:
-            logger.warning("No adapter for platform %s in /btw task %s", source.platform, task_id)
-            return
-
-        _thread_meta = {"thread_id": source.thread_id} if source.thread_id else None
-
-        try:
-            user_config = _load_gateway_config()
-            model, runtime_kwargs = self._resolve_session_agent_runtime(
-                source=source,
-                session_key=session_key,
-                user_config=user_config,
-            )
-            if not runtime_kwargs.get("api_key"):
-                await adapter.send(
-                    source.chat_id,
-                    "❌ /btw failed: no provider credentials configured.",
-                    metadata=_thread_meta,
-                )
-                return
-
-            platform_key = _platform_config_key(source.platform)
-            reasoning_config = self._load_reasoning_config()
-            self._service_tier = self._load_service_tier()
-            turn_route = self._resolve_turn_agent_config(question, model, runtime_kwargs)
-            pr = self._provider_routing
-
-            # Snapshot history from running agent or stored transcript
-            running_agent = self._running_agents.get(session_key)
-            if running_agent and running_agent is not _AGENT_PENDING_SENTINEL:
-                history_snapshot = list(getattr(running_agent, "_session_messages", []) or [])
-            else:
-                session_entry = self.session_store.get_or_create_session(source)
-                history_snapshot = self.session_store.load_transcript(session_entry.session_id)
-
-            btw_prompt = (
-                "[Ephemeral /btw side question. Answer using the conversation "
-                "context. No tools available. Be direct and concise.]\n\n"
-                + question
-            )
-
-            def run_sync():
-                agent = AIAgent(
-                    model=turn_route["model"],
-                    **turn_route["runtime"],
-                    max_iterations=8,
-                    quiet_mode=True,
-                    verbose_logging=False,
-                    enabled_toolsets=[],
-                    reasoning_config=reasoning_config,
-                    service_tier=self._service_tier,
-                    request_overrides=turn_route.get("request_overrides"),
-                    providers_allowed=pr.get("only"),
-                    providers_ignored=pr.get("ignore"),
-                    providers_order=pr.get("order"),
-                    provider_sort=pr.get("sort"),
-                    provider_require_parameters=pr.get("require_parameters", False),
-                    provider_data_collection=pr.get("data_collection"),
-                    session_id=task_id,
-                    platform=platform_key,
-                    session_db=None,
-                    fallback_model=self._fallback_model,
-                    skip_memory=True,
-                    skip_context_files=True,
-                    persist_session=False,
-                )
-                try:
-                    return agent.run_conversation(
-                        user_message=self._maybe_language_hint(btw_prompt),
-                        conversation_history=history_snapshot,
-                        task_id=task_id,
-                    )
-                finally:
-                    self._cleanup_agent_resources(agent)
-
-            result = await self._run_in_executor_with_context(run_sync)
-            self._record_turn_outcome(turn_route, result)
-
-            response = (result.get("final_response") or "") if result else ""
-            if not response and result and result.get("error"):
-                response = f"Error: {result['error']}"
-            if not response:
-                response = "(No response generated)"
-
-            media_files, response = adapter.extract_media(response)
-            images, text_content = adapter.extract_images(response)
-            preview = question[:60] + ("..." if len(question) > 60 else "")
-            header = f'💬 /btw: "{preview}"\n\n'
-
-            if text_content:
-                await adapter.send(
-                    chat_id=source.chat_id,
-                    content=header + text_content,
-                    metadata=_thread_meta,
-                )
-            elif not images and not media_files:
-                await adapter.send(
-                    chat_id=source.chat_id,
-                    content=header + "(No response generated)",
-                    metadata=_thread_meta,
-                )
-
-            for image_url, alt_text in (images or []):
-                try:
-                    await adapter.send_image(chat_id=source.chat_id, image_url=image_url, caption=alt_text)
-                except Exception:
-                    pass
-
-            for media_path, _is_voice in (media_files or []):
-                try:
-                    await adapter.send_file(chat_id=source.chat_id, file_path=media_path)
-                except Exception:
-                    pass
-
-        except Exception as e:
-            logger.exception("/btw task %s failed", task_id)
-            try:
-                await adapter.send(
-                    chat_id=source.chat_id,
-                    content=f"❌ /btw failed: {e}",
-                    metadata=_thread_meta,
-                )
-            except Exception:
-                pass
-
-=======
->>>>>>> v2026.5.7
     async def _handle_reasoning_command(self, event: MessageEvent) -> str:
         """Handle /reasoning command — manage reasoning effort and display toggle.
 
@@ -9830,10 +9570,9 @@ class GatewayRunner:
             )
 
         # --- cycle mode (per-platform) ----------------------------------------
-        cycle = ["off", "internal", "new", "all", "verbose"]
+        cycle = ["off", "new", "all", "verbose"]
         descriptions = {
             "off": "⚙️ Tool progress: **OFF** — no tool activity shown.",
-            "internal": "⚙️ Tool progress: **INTERNAL** — hides retrieval/search tools, shows a collapsed summary (default for Telegram).",
             "new": "⚙️ Tool progress: **NEW** — shown when tool changes (preview length: `display.tool_preview_length`, default 40).",
             "all": "⚙️ Tool progress: **ALL** — every tool call shown (preview length: `display.tool_preview_length`, default 40).",
             "verbose": "⚙️ Tool progress: **VERBOSE** — every tool call with full arguments.",
@@ -9841,7 +9580,7 @@ class GatewayRunner:
 
         # Read current effective mode for this platform via the resolver
         from gateway.display_config import resolve_display_setting
-        current = resolve_display_setting(user_config, platform_key, "tool_progress", "internal")
+        current = resolve_display_setting(user_config, platform_key, "tool_progress", "all")
         if current not in cycle:
             current = "all"
         idx = (cycle.index(current) + 1) % len(cycle)
@@ -12045,7 +11784,6 @@ class GatewayRunner:
         in a ``finally`` block.
         """
         from gateway.session_context import set_session_vars
-        os.environ["HERMES_SESSION_PLATFORM"] = context.source.platform.value
         return set_session_vars(
             platform=context.source.platform.value,
             chat_id=context.source.chat_id,
@@ -13376,11 +13114,6 @@ class GatewayRunner:
         last_tool = [None]  # Mutable container for tracking in closure
         last_progress_msg = [None]  # Track last message for dedup
         repeat_count = [0]  # How many times the same message repeated
-<<<<<<< HEAD
-        _internal_counter = [0]  # Count of suppressed internal tool calls
-        last_internal_tool = [None]  # Last internal tool name (for collapsed summary)
-        
-=======
 
         # Auto-cleanup of temporary progress bubbles (Telegram + any adapter
         # that implements ``delete_message``). When enabled via
@@ -13404,7 +13137,6 @@ class GatewayRunner:
         long_tool_hint_fired = [False]
         _LONG_TOOL_THRESHOLD_S = 30.0
 
->>>>>>> v2026.5.7
         def progress_callback(event_type: str, tool_name: str = None, preview: str = None, args: dict = None, **kwargs):
             """Callback invoked by agent on tool lifecycle events."""
             if not progress_queue or not _run_still_current():
@@ -13444,17 +13176,6 @@ class GatewayRunner:
             if event_type not in ("tool.started",):
                 return
 
-<<<<<<< HEAD
-            # Filter internal/retrieval tools from user-facing chat.
-            # "internal" mode hides them; "all" and "verbose" show everything.
-            from gateway.display_config import is_internal_tool
-            _is_internal = is_internal_tool(tool_name or "")
-            if _is_internal and progress_mode in ("internal", "new"):
-                # Count but don't display — we'll emit a collapsed summary later
-                _internal_counter[0] += 1
-                last_internal_tool[0] = tool_name
-                return
-=======
             # Suppress tool-progress bubbles once the user has sent `stop`.
             # When the LLM response carries N parallel tool calls, the agent
             # fires N "tool.started" events back-to-back before checking for
@@ -13470,7 +13191,6 @@ class GatewayRunner:
                     return
             except Exception:
                 pass
->>>>>>> v2026.5.7
 
             # "new" mode: only report when tool changes
             if progress_mode == "new" and tool_name == last_tool[0]:
@@ -13757,18 +13477,6 @@ class GatewayRunner:
         tools_holder = [None]   # Mutable container for the tool definitions
         stream_consumer_holder = [None]  # Mutable container for stream consumer
         
-        # Emit collapsed internal-tool summary before agent result.
-        # When "internal" progress mode hid retrieval/search calls, show a
-        # single line like "🔍 Searching… (3 queries)" so the user knows
-        # work happened, without the wall of individual tool traces.
-        if _internal_counter[0] > 0 and progress_queue is not None:
-            _summary_parts = []
-            if _internal_counter[0] == 1:
-                _summary_parts.append(f"🔍 {last_internal_tool[0] or 'searching'}…")
-            else:
-                _summary_parts.append(f"🔍 Searching… ({_internal_counter[0]} queries)")
-            progress_queue.put(_summary_parts[0])
-
         # Bridge sync step_callback → async hooks.emit for agent:step events
         _loop_for_step = asyncio.get_running_loop()
         _hooks_ref = self.hooks
@@ -14376,9 +14084,6 @@ class GatewayRunner:
             _approval_session_token = set_current_session_key(_approval_session_key)
             register_gateway_notify(_approval_session_key, _approval_notify_sync)
             try:
-<<<<<<< HEAD
-                result = agent.run_conversation(self._maybe_language_hint(message), conversation_history=agent_history, task_id=session_id)
-=======
                 # If _prepare_inbound_message_text buffered image paths for native
                 # attachment, wrap the user turn as an OpenAI-style multimodal
                 # content list. Consume-and-clear so subsequent turns on the same
@@ -14411,12 +14116,10 @@ class GatewayRunner:
                     _run_message = message
 
                 result = agent.run_conversation(_run_message, conversation_history=agent_history, task_id=session_id)
->>>>>>> v2026.5.7
             finally:
                 unregister_gateway_notify(_approval_session_key)
                 reset_current_session_key(_approval_session_token)
             result_holder[0] = result
-            self._record_turn_outcome(turn_route, result)
 
             # Signal the stream consumer that the agent is done
             if _stream_consumer is not None:

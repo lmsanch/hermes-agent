@@ -73,12 +73,6 @@ from tools.managed_tool_gateway import resolve_managed_tool_gateway
 from tools.tool_backend_helpers import managed_nous_tools_enabled, prefers_gateway, resolve_openai_audio_api_key
 from tools.xai_http import hermes_xai_user_agent
 
-try:
-    from tools.secret_redactor import redact as _redact_secrets
-except ImportError:  # pragma: no cover
-    def _redact_secrets(text: str) -> str:
-        return text
-
 # ---------------------------------------------------------------------------
 # Lazy imports -- providers are imported only when actually used to avoid
 # crashing in headless environments (SSH, Docker, WSL, no PortAudio).
@@ -1256,32 +1250,6 @@ def _default_neutts_ref_text() -> str:
     return str(Path(__file__).parent / "neutts_samples" / "jo.txt")
 
 
-def _generate_fish_audio(text: str, output_path: str, tts_config: Dict[str, Any]) -> str:
-    api_key = os.getenv("FISH_AUDIO_API_KEY", tts_config.get("fish", {}).get("api_key", ""))
-    if not api_key:
-        raise RuntimeError("FISH_AUDIO_API_KEY not set")
-    voice_id = tts_config.get("fish", {}).get("voice_id", os.getenv("FISH_AUDIO_VOICE_ID", ""))
-    if not voice_id:
-        raise RuntimeError("FISH_AUDIO_VOICE_ID not set")
-    base_url = tts_config.get("fish", {}).get("base_url", "https://api.fish.audio")
-    import urllib.request
-    import json as _json
-    fish_format = "opus" if output_path.endswith(".ogg") else "mp3"
-    payload = _json.dumps({"text": text, "reference_id": voice_id, "format": fish_format}).encode("utf-8")
-    req = urllib.request.Request(
-        f"{base_url}/v1/tts",
-        data=payload,
-        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-        method="POST",
-    )
-    with urllib.request.urlopen(req, timeout=60) as resp:
-        audio = resp.read()
-    if not audio or len(audio) < 100:
-        raise RuntimeError("Fish Audio returned empty or tiny response")
-    with open(output_path, "wb") as f:
-        f.write(audio)
-    return output_path
-
 def _generate_neutts(text: str, output_path: str, tts_config: Dict[str, Any]) -> str:
     """Generate speech using the local NeuTTS engine.
 
@@ -1586,18 +1554,6 @@ def text_to_speech_tool(
     if not text or not text.strip():
         return tool_error("Text is required", success=False)
 
-<<<<<<< HEAD
-    # Redact known secrets before synthesis — voice output is as public as
-    # chat text. See toryx-private#818.
-    text = _redact_secrets(text)
-
-    # Truncate very long text with a warning
-    if len(text) > MAX_TEXT_LENGTH:
-        logger.warning("TTS text too long (%d chars), truncating to %d", len(text), MAX_TEXT_LENGTH)
-        text = text[:MAX_TEXT_LENGTH]
-
-=======
->>>>>>> v2026.5.7
     tts_config = _load_tts_config()
     provider = _get_provider(tts_config)
 
@@ -1623,8 +1579,6 @@ def text_to_speech_tool(
     # and needs ffmpeg for conversion.
     from gateway.session_context import get_session_env
     platform = get_session_env("HERMES_SESSION_PLATFORM", "").lower()
-    if not platform:
-        platform = os.getenv("HERMES_SESSION_PLATFORM", "").lower()
     want_opus = (platform == "telegram")
 
     # Determine output path
@@ -1646,11 +1600,7 @@ def text_to_speech_tool(
             file_path = out_dir / f"tts_{timestamp}.{fmt}"
         # Use .ogg for Telegram with providers that support native Opus output,
         # otherwise fall back to .mp3 (Edge TTS will attempt ffmpeg conversion later).
-<<<<<<< HEAD
-        if want_opus and provider in ("openai", "elevenlabs", "mistral", "gemini", "fish"):
-=======
         elif want_opus and provider in ("openai", "elevenlabs", "mistral", "gemini"):
->>>>>>> v2026.5.7
             file_path = out_dir / f"tts_{timestamp}.ogg"
         else:
             file_path = out_dir / f"tts_{timestamp}.mp3"
@@ -1715,13 +1665,6 @@ def text_to_speech_tool(
             logger.info("Generating speech with Google Gemini TTS...")
             _generate_gemini_tts(text, file_str, tts_config)
 
-        elif provider == "fish":
-            api_key = os.getenv("FISH_AUDIO_API_KEY", tts_config.get("fish", {}).get("api_key", ""))
-            if not api_key:
-                return json.dumps({"success": False, "error": "FISH_AUDIO_API_KEY not set"}, ensure_ascii=False)
-            logger.info("Generating speech with Fish Audio...")
-            _generate_fish_audio(text, file_str, tts_config)
-
         elif provider == "neutts":
             if not _check_neutts_available():
                 return json.dumps({
@@ -1732,10 +1675,6 @@ def text_to_speech_tool(
             logger.info("Generating speech with NeuTTS (local)...")
             _generate_neutts(text, file_str, tts_config)
 
-<<<<<<< HEAD
-        elif provider == "edge":
-            # Edge TTS (free), with NeuTTS as local fallback
-=======
         elif provider == "kittentts":
             try:
                 _import_kittentts()
@@ -1764,7 +1703,6 @@ def text_to_speech_tool(
 
         else:
             # Default: Edge TTS (free), with NeuTTS as local fallback
->>>>>>> v2026.5.7
             edge_available = True
             try:
                 _import_edge_tts()
@@ -1792,23 +1730,6 @@ def text_to_speech_tool(
                              "or set up NeuTTS for local synthesis."
                 }, ensure_ascii=False)
 
-        else:
-            # Fail loud on unknown provider. Silently falling back to Edge
-            # masked a Fish Audio regression for ~a day (toryx-private#797).
-            # See tests/tools/test_tts_providers.py — that test enforces the
-            # set of known providers at CI time.
-            known = sorted({
-                "edge", "elevenlabs", "openai", "minimax", "xai",
-                "mistral", "gemini", "fish", "neutts",
-            })
-            msg = (
-                f"TTS provider {provider!r} is not implemented. "
-                f"Known providers: {', '.join(known)}. "
-                f"Check your tts.provider config — typos silently broke voice output before this check existed."
-            )
-            logger.error("tts: %s", msg)
-            return json.dumps({"success": False, "error": msg}, ensure_ascii=False)
-
         # Check the file was actually created
         if not os.path.exists(file_str) or os.path.getsize(file_str) == 0:
             return json.dumps({
@@ -1834,7 +1755,7 @@ def text_to_speech_tool(
             if opus_path:
                 file_str = opus_path
                 voice_compatible = True
-        elif provider in ("elevenlabs", "openai", "mistral", "gemini", "fish"):
+        elif provider in ("elevenlabs", "openai", "mistral", "gemini"):
             voice_compatible = file_str.endswith(".ogg")
 
         file_size = os.path.getsize(file_str)

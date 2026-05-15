@@ -41,11 +41,6 @@ from types import SimpleNamespace
 import urllib.request
 import uuid
 from typing import List, Dict, Any, Optional
-<<<<<<< HEAD
-from openai import OpenAI
-import fire
-from datetime import date, datetime, timezone
-=======
 from urllib.parse import urlparse, parse_qs, urlunparse
 # NOTE: `from openai import OpenAI` is deliberately NOT at module top — the
 # SDK pulls ~240 ms of imports. We expose `OpenAI` as a thin proxy object
@@ -60,7 +55,6 @@ from urllib.parse import urlparse, parse_qs, urlunparse
 # daemon thread (e.g. curator's forked review agent) never fails with
 # ModuleNotFoundError on broken/partial installs where `fire` isn't present.
 from datetime import datetime
->>>>>>> v2026.5.7
 from pathlib import Path
 
 from hermes_constants import get_hermes_home
@@ -779,65 +773,6 @@ def _sanitize_messages_non_ascii(messages: list) -> bool:
                     msg[key] = sanitized
                     found = True
     return found
-
-
-def _normalize_messages_for_groq(messages: list) -> list:
-    """Collapse content-block lists and dicts to plain strings for Groq compatibility.
-
-    Groq's chat completions API requires message content to be a string
-    (for role=tool) or a string/list of content blocks (for role=user/assistant).
-    It rejects plain dict content.  The OpenAI Python SDK can produce
-    dict-typed content in some edge cases (e.g. reasoning_content, tool
-    results with structured output).  This normalizer collapses dicts and
-    lists to plain strings so Groq never receives an object-typed content field.
-    """
-    result = []
-    for msg in messages:
-        if not isinstance(msg, dict):
-            result.append(msg)
-            continue
-        content = msg.get("content")
-        if isinstance(content, dict):
-            text = content.get("text", "")
-            if not text:
-                text = json.dumps(content, ensure_ascii=False)
-            msg = {**msg, "content": text}
-        elif isinstance(content, list):
-            parts = []
-            for block in content:
-                if isinstance(block, dict):
-                    parts.append(block.get("text", ""))
-                else:
-                    parts.append(str(block))
-            msg = {**msg, "content": "\n".join(p for p in parts if p)}
-        result.append(msg)
-    return result
-
-
-def _append_trace_line(agent: str, trace_entry: dict) -> None:
-    """Append one JSONL trace line to ``~/.hermes/profiles/<agent>/traces/YYYY-MM-DD.jsonl``."""
-    try:
-        from hermes_constants import get_hermes_home
-        traces_dir = get_hermes_home() / "traces"
-        traces_dir.mkdir(parents=True, exist_ok=True)
-        today = date.today().isoformat()
-        trace_file = traces_dir / f"{today}.jsonl"
-        with open(trace_file, "a", encoding="utf-8") as f:
-            f.write(json.dumps(trace_entry, ensure_ascii=False) + "\n")
-    except Exception:
-        logger.debug("trace logging failed", exc_info=True)
-
-
-def _provider_needs_content_normalization(provider_name: str, base_url_lower: str) -> bool:
-    """Return True for providers that reject object-typed message content."""
-    p = (provider_name or "").lower()
-    b = (base_url_lower or "").lower()
-    return (
-        "groq" in p
-        or "fireworks" in p
-        or "api.groq.com" in b
-        or "api.fireworks.ai" in b
-    )
 
 
 def _sanitize_tools_non_ascii(tools: list) -> bool:
@@ -8784,119 +8719,8 @@ class AIAgent:
             _omit_temp = False
             _fixed_temp = None
 
-<<<<<<< HEAD
-            if not is_github_responses:
-                kwargs["prompt_cache_key"] = self.session_id
-
-            is_xai_responses = self.provider == "xai" or "api.x.ai" in (self.base_url or "").lower()
-
-            if reasoning_enabled and is_xai_responses:
-                # xAI reasons automatically — no effort param, just include encrypted content
-                kwargs["include"] = ["reasoning.encrypted_content"]
-            elif reasoning_enabled:
-                if is_github_responses:
-                    # Copilot's Responses route advertises reasoning-effort support,
-                    # but not OpenAI-specific prompt cache or encrypted reasoning
-                    # fields. Keep the payload to the documented subset.
-                    github_reasoning = self._github_models_reasoning_extra_body()
-                    if github_reasoning is not None:
-                        kwargs["reasoning"] = github_reasoning
-                else:
-                    kwargs["reasoning"] = {"effort": reasoning_effort, "summary": "auto"}
-                    kwargs["include"] = ["reasoning.encrypted_content"]
-            elif not is_github_responses and not is_xai_responses:
-                kwargs["include"] = []
-
-            if self.request_overrides:
-                kwargs.update(self.request_overrides)
-
-            if self.max_tokens is not None and not is_codex_backend:
-                kwargs["max_output_tokens"] = self.max_tokens
-
-            if is_xai_responses and getattr(self, "session_id", None):
-                kwargs["extra_headers"] = {"x-grok-conv-id": self.session_id}
-
-            return kwargs
-
-        sanitized_messages = api_messages
-        needs_sanitization = False
-        for msg in api_messages:
-            if not isinstance(msg, dict):
-                continue
-            if "codex_reasoning_items" in msg:
-                needs_sanitization = True
-                break
-
-            tool_calls = msg.get("tool_calls")
-            if isinstance(tool_calls, list):
-                for tool_call in tool_calls:
-                    if not isinstance(tool_call, dict):
-                        continue
-                    if "call_id" in tool_call or "response_item_id" in tool_call:
-                        needs_sanitization = True
-                        break
-                if needs_sanitization:
-                    break
-
-        if needs_sanitization:
-            sanitized_messages = copy.deepcopy(api_messages)
-            for msg in sanitized_messages:
-                if not isinstance(msg, dict):
-                    continue
-
-                # Codex-only replay state must not leak into strict chat-completions APIs.
-                msg.pop("codex_reasoning_items", None)
-
-                tool_calls = msg.get("tool_calls")
-                if isinstance(tool_calls, list):
-                    for tool_call in tool_calls:
-                        if isinstance(tool_call, dict):
-                            tool_call.pop("call_id", None)
-                            tool_call.pop("response_item_id", None)
-
-        # Qwen portal: normalize content to list-of-dicts, inject cache_control.
-        # Must run AFTER codex sanitization so we transform the final messages.
-        # If sanitization already deepcopied, reuse that copy (in-place).
-        if self._is_qwen_portal():
-            if sanitized_messages is api_messages:
-                # No sanitization was done — we need our own copy.
-                sanitized_messages = self._qwen_prepare_chat_messages(sanitized_messages)
-            else:
-                # Already a deepcopy — transform in place to avoid a second deepcopy.
-                self._qwen_prepare_chat_messages_inplace(sanitized_messages)
-
-        # Groq requires content to be a plain string, not a list of content
-        # blocks.  The OpenAI SDK wraps strings into [{type: text, text: ...}]
-        # before serializing; this reverses that for Groq providers.
-        if _provider_needs_content_normalization(self.provider, self._base_url_lower):
-            sanitized_messages = _normalize_messages_for_groq(sanitized_messages)
-            for i, msg in enumerate(sanitized_messages):
-                if msg.get("role") == "tool":
-                    content = msg.get("content")
-                    logger.debug(
-                        "Normalized tool message %d content type: %s",
-                        i,
-                        type(content).__name__,
-                    )
-
-        # GPT-5 and Codex models respond better to 'developer' than 'system'
-        # for instruction-following.  Swap the role at the API boundary so
-        # internal message representation stays uniform ("system").
-        _model_lower = (self.model or "").lower()
-        if (
-            sanitized_messages
-            and sanitized_messages[0].get("role") == "system"
-            and any(p in _model_lower for p in DEVELOPER_ROLE_MODELS)
-        ):
-            # Shallow-copy the list + first message only — rest stays shared.
-            sanitized_messages = list(sanitized_messages)
-            sanitized_messages[0] = {**sanitized_messages[0], "role": "developer"}
-
-        provider_preferences = {}
-=======
         # Provider preferences (OpenRouter-style)
         _prefs: Dict[str, Any] = {}
->>>>>>> v2026.5.7
         if self.providers_allowed:
             _prefs["only"] = self.providers_allowed
         if self.providers_ignored:
@@ -9436,79 +9260,32 @@ class AIAgent:
 
     @staticmethod
     def _sanitize_tool_calls_for_strict_api(api_msg: dict) -> dict:
-        """Scrub tool_calls so strict OpenAI-compatible APIs accept the replay.
+        """Strip Codex Responses API fields from tool_calls for strict providers.
 
-        Does two things to the *outgoing API copy* (the in-memory history is
-        untouched so Codex-side fallback still works if the session pivots):
-
-        1. Strip Codex Responses API fields (`call_id`, `response_item_id`).
-           Mistral / Fireworks / Groq reject these with 400/422.
-
-        2. Repair malformed JSON in `function.arguments`. Some models
-           (smaller ones, post-context-compaction states, TS arms that
-           sampled a weak model) emit tool_calls whose `arguments` string
-           is not valid JSON. When that message is later replayed to a
-           strict API, the whole turn 400s:
-
-             Invalid tool call in messages:
-             tool_calls[].function.arguments for function 'X' must be a
-             JSON object string (or an object), got invalid JSON
-
-           Scrub strategy: parse-test each `arguments` string; if it
-           doesn't parse, replace with ``"{}"``. The tool *result* in the
-           next message still carries whatever the tool actually produced,
-           so the model has the semantic information — it just loses
-           visibility of the malformed arg string, which is strictly worse
-           than a hard 400 on every subsequent turn.
+        Providers like Mistral, Fireworks, and other strict OpenAI-compatible APIs
+        validate the Chat Completions schema and reject unknown fields (call_id,
+        response_item_id) with 400 or 422 errors. These fields are preserved in
+        the internal message history — this method only modifies the outgoing
+        API copy.
 
         Creates new tool_call dicts rather than mutating in-place, so the
         original messages list retains call_id/response_item_id for Codex
-        Responses API compatibility.
-        """
-        import json as _json
+        Responses API compatibility (e.g. if the session falls back to a
+        Codex provider later).
 
+        Fields stripped: call_id, response_item_id
+        """
         tool_calls = api_msg.get("tool_calls")
         if not isinstance(tool_calls, list):
             return api_msg
         _STRIP_KEYS = {"call_id", "response_item_id"}
-        scrubbed = []
-        for tc in tool_calls:
-            if not isinstance(tc, dict):
-                scrubbed.append(tc)
-                continue
-            new_tc = {k: v for k, v in tc.items() if k not in _STRIP_KEYS}
-            fn = new_tc.get("function")
-            if isinstance(fn, dict):
-                args = fn.get("arguments")
-                # Only validate string-form args; dict-form is already an
-                # object and doesn't need JSON parsing.
-                if isinstance(args, str):
-                    try:
-                        _json.loads(args)
-                    except (ValueError, TypeError):
-                        fn_copy = dict(fn)
-                        fn_copy["arguments"] = "{}"
-                        new_tc["function"] = fn_copy
-            scrubbed.append(new_tc)
-        api_msg["tool_calls"] = scrubbed
+        api_msg["tool_calls"] = [
+            {k: v for k, v in tc.items() if k not in _STRIP_KEYS}
+            if isinstance(tc, dict) else tc
+            for tc in tool_calls
+        ]
         return api_msg
 
-<<<<<<< HEAD
-
-    def _supports_reasoning_content(self) -> bool:
-        """Check if the current provider supports reasoning_content in messages.
-
-        Groq and some strict APIs reject reasoning_content. Return False
-        for providers known to not support it.
-        """
-        provider = getattr(self, 'provider_label', '') or ''
-        base_url = getattr(self, 'base_url', '') or ''
-        unsupported = ('groq', 'cerebras', 'sambanova')
-        for u in unsupported:
-            if u in provider.lower() or u in base_url.lower():
-                return False
-        return True
-=======
     @staticmethod
     def _sanitize_tool_call_arguments(
         messages: list,
@@ -9618,7 +9395,6 @@ class AIAgent:
             message_index += 1
 
         return repaired
->>>>>>> v2026.5.7
 
     def _should_sanitize_tool_calls(self) -> bool:
         """Determine if tool_calls need sanitization for strict APIs.
@@ -9633,180 +9409,6 @@ class AIAgent:
         """
         return self.api_mode != "codex_responses"
 
-<<<<<<< HEAD
-    def flush_memories(self, messages: list = None, min_turns: int = None):
-        """Give the model one turn to persist memories before context is lost.
-
-        Called before compression, session reset, or CLI exit. Injects a flush
-        message, makes one API call, executes any memory tool calls, then
-        strips all flush artifacts from the message list.
-
-        Args:
-            messages: The current conversation messages. If None, uses
-                      self._session_messages (last run_conversation state).
-            min_turns: Minimum user turns required to trigger the flush.
-                       None = use config value (flush_min_turns).
-                       0 = always flush (used for compression).
-        """
-        if self._memory_flush_min_turns == 0 and min_turns is None:
-            return
-        if "memory" not in self.valid_tool_names or not self._memory_store:
-            return
-        effective_min = min_turns if min_turns is not None else self._memory_flush_min_turns
-        if self._user_turn_count < effective_min:
-            return
-
-        if messages is None:
-            messages = getattr(self, '_session_messages', None)
-        if not messages or len(messages) < 3:
-            return
-
-        flush_content = (
-            "[System: The session is being compressed. "
-            "Save anything worth remembering — prioritize user preferences, "
-            "corrections, and recurring patterns over task-specific details.]"
-        )
-        _sentinel = f"__flush_{id(self)}_{time.monotonic()}"
-        flush_msg = {"role": "user", "content": flush_content, "_flush_sentinel": _sentinel}
-        messages.append(flush_msg)
-
-        try:
-            # Build API messages for the flush call
-            _needs_sanitize = self._should_sanitize_tool_calls()
-            api_messages = []
-            for msg in messages:
-                api_msg = msg.copy()
-                if msg.get("role") == "assistant":
-                    reasoning = msg.get("reasoning")
-                    if reasoning:
-                        api_msg["reasoning_content"] = reasoning
-                api_msg.pop("reasoning", None)
-                api_msg.pop("finish_reason", None)
-                api_msg.pop("_flush_sentinel", None)
-                api_msg.pop("_thinking_prefill", None)
-                if _needs_sanitize:
-                    self._sanitize_tool_calls_for_strict_api(api_msg)
-                api_messages.append(api_msg)
-
-            if self._cached_system_prompt:
-                api_messages = [{"role": "system", "content": self._cached_system_prompt}] + api_messages
-
-            # Make one API call with only the memory tool available
-            memory_tool_def = None
-            for t in (self.tools or []):
-                if t.get("function", {}).get("name") == "memory":
-                    memory_tool_def = t
-                    break
-
-            if not memory_tool_def:
-                messages.pop()  # remove flush msg
-                return
-
-            # Use auxiliary client for the flush call when available --
-            # it's cheaper and avoids Codex Responses API incompatibility.
-            from agent.auxiliary_client import call_llm as _call_llm
-            _aux_available = True
-            try:
-                response = _call_llm(
-                    task="flush_memories",
-                    messages=api_messages,
-                    tools=[memory_tool_def],
-                    temperature=0.3,
-                    max_tokens=5120,
-                    # timeout resolved from auxiliary.flush_memories.timeout config
-                )
-            except RuntimeError:
-                _aux_available = False
-                response = None
-
-            if not _aux_available and self.api_mode == "codex_responses":
-                # No auxiliary client -- use the Codex Responses path directly
-                codex_kwargs = self._build_api_kwargs(api_messages)
-                codex_kwargs["tools"] = self._responses_tools([memory_tool_def])
-                codex_kwargs["temperature"] = 0.3
-                if "max_output_tokens" in codex_kwargs:
-                    codex_kwargs["max_output_tokens"] = 5120
-                response = self._run_codex_stream(codex_kwargs)
-            elif not _aux_available and self.api_mode == "anthropic_messages":
-                # Native Anthropic — use the Anthropic client directly
-                from agent.anthropic_adapter import build_anthropic_kwargs as _build_ant_kwargs
-                ant_kwargs = _build_ant_kwargs(
-                    model=self.model, messages=api_messages,
-                    tools=[memory_tool_def], max_tokens=5120,
-                    reasoning_config=None,
-                    preserve_dots=self._anthropic_preserve_dots(),
-                )
-                response = self._anthropic_messages_create(ant_kwargs)
-            elif not _aux_available:
-                _flush_messages = api_messages
-                if "groq" in self._base_url_lower or self.provider == "groq":
-                    _flush_messages = _normalize_messages_for_groq(_flush_messages)
-                    for i, msg in enumerate(_flush_messages):
-                        if msg.get("role") == "tool":
-                            logger.debug(
-                                "Groq tool message %d content type: %s",
-                                i,
-                                type(msg.get("content")).__name__,
-                            )
-                api_kwargs = {
-                    "model": self.model,
-                    "messages": _flush_messages,
-                    "tools": [memory_tool_def],
-                    "temperature": 0.3,
-                    **self._max_tokens_param(5120),
-                }
-                from agent.auxiliary_client import _get_task_timeout
-                response = self._ensure_primary_openai_client(reason="flush_memories").chat.completions.create(
-                    **api_kwargs, timeout=_get_task_timeout("flush_memories")
-                )
-
-            # Extract tool calls from the response, handling all API formats
-            tool_calls = []
-            if self.api_mode == "codex_responses" and not _aux_available:
-                assistant_msg, _ = self._normalize_codex_response(response)
-                if assistant_msg and assistant_msg.tool_calls:
-                    tool_calls = assistant_msg.tool_calls
-            elif self.api_mode == "anthropic_messages" and not _aux_available:
-                from agent.anthropic_adapter import normalize_anthropic_response as _nar_flush
-                _flush_msg, _ = _nar_flush(response, strip_tool_prefix=self._is_anthropic_oauth)
-                if _flush_msg and _flush_msg.tool_calls:
-                    tool_calls = _flush_msg.tool_calls
-            elif hasattr(response, "choices") and response.choices:
-                assistant_message = response.choices[0].message
-                if assistant_message.tool_calls:
-                    tool_calls = assistant_message.tool_calls
-
-            for tc in tool_calls:
-                if tc.function.name == "memory":
-                    try:
-                        args = json.loads(tc.function.arguments)
-                        flush_target = args.get("target", "memory")
-                        from tools.memory_tool import memory_tool as _memory_tool
-                        _memory_tool(
-                            action=args.get("action"),
-                            target=flush_target,
-                            content=args.get("content"),
-                            old_text=args.get("old_text"),
-                            store=self._memory_store,
-                        )
-                        if not self.quiet_mode:
-                            print(f"  🧠 Memory flush: saved to {args.get('target', 'memory')}")
-                    except Exception as e:
-                        logger.debug("Memory flush tool call failed: %s", e)
-        except Exception as e:
-            logger.debug("Memory flush API call failed: %s", e)
-        finally:
-            # Strip flush artifacts: remove everything from the flush message onward.
-            # Use sentinel marker instead of identity check for robustness.
-            while messages and messages[-1].get("_flush_sentinel") != _sentinel:
-                messages.pop()
-                if not messages:
-                    break
-            if messages and messages[-1].get("_flush_sentinel") == _sentinel:
-                messages.pop()
-
-=======
->>>>>>> v2026.5.7
     def _compress_context(self, messages: list, system_message: str, *, approx_tokens: int = None, task_id: str = "default", focus_topic: str = None) -> tuple:
         """Compress conversation context and split the session in SQLite.
 
@@ -11056,19 +10658,9 @@ class AIAgent:
                 _cnr_sum = _ct_sum.normalize_response(summary_response)
                 final_response = (_cnr_sum.content or "").strip()
             else:
-                _summary_messages = api_messages
-                if _provider_needs_content_normalization(self.provider, self._base_url_lower):
-                    _summary_messages = _normalize_messages_for_groq(_summary_messages)
-                    for i, msg in enumerate(_summary_messages):
-                        if msg.get("role") == "tool":
-                            logger.debug(
-                                "Normalized tool message %d content type: %s",
-                                i,
-                                type(msg.get("content")).__name__,
-                            )
                 summary_kwargs = {
                     "model": self.model,
-                    "messages": _summary_messages,
+                    "messages": api_messages,
                 }
                 if _summary_temperature is not None:
                     summary_kwargs["temperature"] = _summary_temperature
@@ -11136,19 +10728,9 @@ class AIAgent:
                     _retry_result = _tretry.normalize_response(retry_response, strip_tool_prefix=self._is_anthropic_oauth)
                     final_response = (_retry_result.content or "").strip()
                 else:
-                    _retry_messages = api_messages
-                    if _provider_needs_content_normalization(self.provider, self._base_url_lower):
-                        _retry_messages = _normalize_messages_for_groq(_retry_messages)
-                        for i, msg in enumerate(_retry_messages):
-                            if msg.get("role") == "tool":
-                                logger.debug(
-                                    "Normalized tool message %d content type: %s",
-                                    i,
-                                    type(msg.get("content")).__name__,
-                                )
                     summary_kwargs = {
                         "model": self.model,
-                        "messages": _retry_messages,
+                        "messages": api_messages,
                     }
                     if _summary_temperature is not None:
                         summary_kwargs["temperature"] = _summary_temperature
@@ -11261,7 +10843,6 @@ class AIAgent:
         self._codex_incomplete_retries = 0
         self._thinking_prefill_retries = 0
         self._post_tool_empty_retried = False
-        self._zero_tool_call_retried = False
         self._last_content_with_tools = None
         self._last_content_tools_all_housekeeping = False
         self._mute_post_response = False
@@ -11524,7 +11105,6 @@ class AIAgent:
         truncated_response_prefix = ""
         compression_attempts = 0
         _turn_exit_reason = "unknown"  # Diagnostic: why the loop ended
-        _trace_start_time = time.time()
         
         # Record the execution thread so interrupt()/clear_interrupt() can
         # scope the tool-level interrupt signal to THIS agent's thread only.
@@ -11733,16 +11313,7 @@ class AIAgent:
 
                 # For ALL assistant messages, pass reasoning back to the API
                 # This ensures multi-turn reasoning context is preserved
-<<<<<<< HEAD
-                if msg.get("role") == "assistant":
-                    reasoning_text = msg.get("reasoning")
-                    if reasoning_text:
-                        # Add reasoning_content for API compatibility (Moonshot AI, Novita, OpenRouter)
-                        if self._supports_reasoning_content():
-                            api_msg["reasoning_content"] = reasoning_text
-=======
                 self._copy_reasoning_content_for_api(msg, api_msg)
->>>>>>> v2026.5.7
 
                 # Remove 'reasoning' field - it's for trajectory storage only
                 # We've copied it to 'reasoning_content' for the API above
@@ -14228,39 +13799,6 @@ class AIAgent:
                     # No tool calls - this is the final response
                     final_response = assistant_message.content or ""
                     
-                    # ── Zero-tool-call re-prompt guard ─────────────────────
-                    # qwen3-32b sometimes responds from parametric memory instead
-                    # of calling MCP tools, especially for "quick" questions where
-                    # it thinks it knows the answer. Re-prompt once with explicit
-                    # tool instruction before accepting the response.
-                    # Mirrors research API guard in deep_researcher.py:454-463.
-                    if (
-                        self.valid_tool_names
-                        and api_call_count == 1
-                        and not getattr(self, "_zero_tool_call_retried", False)
-                    ):
-                        self._zero_tool_call_retried = True
-                        logger.info(
-                            "Zero-tool-call on first turn with tools available — "
-                            "re-prompting with explicit tool instruction (model=%s, provider=%s)",
-                            self.model, self.provider,
-                        )
-                        self._emit_status(
-                            "↻ Model skipped tool calls — re-prompting with explicit "
-                            "tool instruction"
-                        )
-                        interim_msg = self._build_assistant_message(assistant_message, finish_reason)
-                        messages.append(interim_msg)
-                        messages.append({
-                            "role": "user",
-                            "content": (
-                                "You have tools available that could answer this question "
-                                "more accurately. Please call the relevant tool before "
-                                "responding."
-                            ),
-                        })
-                        continue
-                    
                     # Fix: unmute output when entering the no-tool-call branch
                     # so the user can see empty-response warnings and recovery
                     # status messages.  _mute_post_response was set during a
@@ -14720,68 +14258,6 @@ class AIAgent:
         else:
             logger.info(_diag_msg, *_diag_args)
 
-<<<<<<< HEAD
-        # ── Per-turn JSONL trace logging (#1311) ──────────────────────
-        _trace_tool_calls = []
-        _trace_consults = []
-        for _m in messages:
-            if not isinstance(_m, dict) or _m.get("role") != "assistant":
-                continue
-            for _tc in (_m.get("tool_calls") or []):
-                if not isinstance(_tc, dict):
-                    continue
-                _fn = _tc.get("function", {})
-                _name = _fn.get("name", "")
-                _args_summary = _fn.get("arguments", "")
-                if isinstance(_args_summary, str) and len(_args_summary) > 200:
-                    _args_summary = _args_summary[:200] + "…"
-                _tcid = _tc.get("id", "")
-                _status = "ok"
-                for _tm in messages:
-                    if (isinstance(_tm, dict)
-                            and _tm.get("role") == "tool"
-                            and _tm.get("tool_call_id") == _tcid):
-                        _content = _tm.get("content", "")
-                        if isinstance(_content, str) and _content.startswith('{"error"'):
-                            _status = "error"
-                        break
-                _tc_entry = {"name": _name, "args_summary": _args_summary, "status": _status}
-                _trace_tool_calls.append(_tc_entry)
-                if _name == "consult_colleague":
-                    try:
-                        _cargs = json.loads(_fn.get("arguments", "{}"))
-                        _trace_consults.append({
-                            "colleague": _cargs.get("agent", ""),
-                            "query_summary": (_cargs.get("query", "")[:100]),
-                        })
-                    except Exception:
-                        pass
-        _fabrication_detected = (
-            _turn_exit_reason.startswith("text_response")
-            and api_call_count == 1
-            and len(_trace_tool_calls) == 0
-            and bool(self.valid_tool_names)
-        )
-        try:
-            from hermes_cli.profiles import get_active_profile_name
-            _trace_agent = get_active_profile_name()
-        except Exception:
-            _trace_agent = "default"
-        _append_trace_line(_trace_agent, {
-            "ts": datetime.now(timezone.utc).isoformat(),
-            "agent": _trace_agent,
-            "model": self.model,
-            "tool_calls": _trace_tool_calls,
-            "consults": _trace_consults,
-            "latency_ms": int((time.time() - _trace_start_time) * 1000),
-            "token_in": self.session_input_tokens,
-            "token_out": self.session_output_tokens,
-            "fabrication_detected": _fabrication_detected,
-            "exit_reason": _turn_exit_reason,
-            "api_calls": api_call_count,
-            "session_id": self.session_id or "",
-        })
-=======
         # Plugin hook: transform_llm_output
         # Fired once per turn after the tool-calling loop completes.
         # Plugins can transform the LLM's output text before it's returned.
@@ -14802,7 +14278,6 @@ class AIAgent:
                         break  # First non-empty string wins
             except Exception as exc:
                 logger.warning("transform_llm_output hook failed: %s", exc)
->>>>>>> v2026.5.7
 
         # Plugin hook: post_llm_call
         # Fired once per turn after the tool-calling loop completes.

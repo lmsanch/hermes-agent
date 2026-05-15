@@ -1,27 +1,25 @@
-"""consult_colleague tool — thin wrapper that shells to another MD via hermes CLI.
+"""consult_colleague tool — thin adapter that delegates to the spec-complete
+implementation at agent/consult_colleague.py (shipped via PR #898).
 
-This is the minimum-viable version. It matches the signature the LLMs already
-naturally emit (agent + query) so the tool call resolves cleanly instead of
-dying as a malformed JSON fragment.
+The OpenAI tool schema (agent, query) and JSON-stringified return shape
+({"colleague", "answer", "latency_ms", "terminal_status"}) are unchanged
+from the MVP shim so the LLM-side contract does NOT change.
 
-When the full 2026-04-18 spec ships (#724 — routing matrix, depth guard,
-audit DB, daily cap), this wrapper is replaced with no caller-side change.
+When the full spec shipped (#724), this adapter replaced the subprocess-only
+MVP shim with no caller-side change.
 """
 from __future__ import annotations
 
 import json
 import logging
 import os
-import subprocess
-import time
-from typing import Any, Dict
+from typing import Any
 
 from tools.registry import registry, tool_error
 
 logger = logging.getLogger(__name__)
 
-_VALID_PROFILES = {"scarlett", "christopher", "hilary", "elon", "eva"}
-_PROFILE_ALIASES = {"hillary": "hilary"}  # one-L vs two-L typo accommodation
+_PROFILE_ALIASES = {"hillary": "hilary"}
 
 
 CONSULT_COLLEAGUE_SCHEMA = {
@@ -34,7 +32,10 @@ CONSULT_COLLEAGUE_SCHEMA = {
         "scarlett, christopher, hilary, elon, eva. The response is the "
         "colleague's final reply as a single string; integrate it into your "
         "own answer and credit them (e.g. 'Christopher says: …'). Do not "
-        "chain multiple consults — call this once per question."
+        "chain multiple consults — call this ONCE per question. If the "
+        "colleague fails (timeout, error, or empty response), do NOT retry "
+        "the consult. Instead, use your own tools (web_search, mcp_kms_*, "
+        "terminal) to answer the question yourself."
     ),
     "parameters": {
         "type": "object",
@@ -64,21 +65,9 @@ CONSULT_COLLEAGUE_SCHEMA = {
 def consult_colleague(agent: str, query: str, **_: Any) -> str:
     agent = (agent or "").strip().lower()
     agent = _PROFILE_ALIASES.get(agent, agent)
-    if agent not in _VALID_PROFILES:
-        return tool_error(
-            f"Unknown colleague '{agent}'. Must be one of: "
-            + ", ".join(sorted(_VALID_PROFILES))
-        )
     if not query or not query.strip():
         return tool_error("query must be a non-empty string")
 
-    caller = os.getenv("HERMES_PROFILE", "unknown")
-    if agent == caller:
-        return tool_error(
-            f"Cannot consult self ('{agent}'). Answer from your own skills instead."
-        )
-
-    # Depth guard — one level only. Prevents A→B→A loops and fan-out.
     depth = int(os.getenv("HERMES_CONSULT_DEPTH", "0") or "0")
     if depth >= 1:
         return tool_error(
@@ -86,54 +75,49 @@ def consult_colleague(agent: str, query: str, **_: Any) -> str:
             "skills or refuse."
         )
 
-    env = os.environ.copy()
-    env["HERMES_CONSULT_DEPTH"] = str(depth + 1)
-    env["HERMES_CONSULT_CALLER"] = caller
-
-    hermes_bin = os.getenv(
-        "HERMES_BIN",
-        "/home/luis/.hermes/hermes-agent/venv/bin/python -m hermes_cli.main",
-    ).split()
-
-    cmd = hermes_bin + [
-        "-p", agent, "chat",
-        "-q", f"[Consult from {caller}] {query}",
-        "-Q",
-        "--max-turns", "30",
-    ]
-    t0 = time.time()
-    try:
-        proc = subprocess.run(
-            cmd,
-            env=env,
-            capture_output=True,
-            text=True,
-            timeout=180,
-        )
-    except subprocess.TimeoutExpired:
+    caller = os.getenv("HERMES_PROFILE", "unknown")
+    if agent == caller:
         return tool_error(
-            f"consult to '{agent}' timed out after 180s. Retry once with a "
-            "tighter question, otherwise refuse and notify the user."
+            f"Cannot consult self ('{agent}'). Answer from your own skills instead."
         )
-    latency_ms = int((time.time() - t0) * 1000)
 
-    answer = (proc.stdout or "").strip()
-    if proc.returncode != 0:
+    from agent.consult_colleague import consult_colleague as impl
+    result = impl(
+        colleague=_PROFILE_ALIASES.get(agent, agent),
+        question=query,
+        context="",
+        urgency="normal",
+    )
+
+    if result.terminal_status == "refused":
+        if result.error and "Daily consult cap" in result.error:
+            return tool_error("daily_cap_exceeded", detail=result.error)
+        if result.error and "Unknown colleague" in result.error:
+            return tool_error(result.error)
+        if result.error:
+            return tool_error(result.error)
+        return tool_error("consult refused")
+
+    if result.terminal_status == "timeout":
         return tool_error(
-            f"consult to '{agent}' failed with exit {proc.returncode}; "
-            f"stderr tail: {(proc.stderr or '')[-400:]}"
+            f"consult to '{agent}' timed out after {result.latency_ms}ms. "
+            "Do NOT retry this consult — use your own tools to answer instead."
         )
-    if not answer:
+
+    if result.terminal_status == "error":
+        return tool_error(result.error or f"consult to '{agent}' failed")
+
+    if not result.answer:
         return tool_error(
-            f"'{agent}' returned empty stdout (ran for {latency_ms} ms). "
-            "Retry once; if still empty, refuse."
+            f"'{agent}' returned empty answer (ran for {result.latency_ms} ms). "
+            "Do NOT retry this consult — use your own tools to answer instead."
         )
 
     return json.dumps({
-        "colleague": agent,
-        "answer": answer,
-        "latency_ms": latency_ms,
-        "terminal_status": "ok",
+        "colleague": result.colleague,
+        "answer": result.answer,
+        "latency_ms": result.latency_ms,
+        "terminal_status": result.terminal_status,
     })
 
 

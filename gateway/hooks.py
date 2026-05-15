@@ -163,10 +163,6 @@ class HookRegistry:
         fire for any "command:..." event. Handlers registered for a base type
         like "agent" won't fire for "agent:start" -- only exact matches and
         explicit wildcards.
-
-        Args:
-            event_type: The event identifier (e.g. "agent:start").
-            context:    Optional dict with event-specific data.
         """
         if context is None:
             context = {}
@@ -177,70 +173,48 @@ class HookRegistry:
                 if asyncio.iscoroutine(result):
                     await result
             except Exception as e:
-                print(f"[hooks] Error in handler for '{event_type}': {e}", flush=True)
+                print("[hooks] Error in handler for {!r}: {}".format(event_type, e), flush=True)
 
-<<<<<<< HEAD
     async def emit_with_result(
         self,
         event_type: str,
         context: Optional[Dict[str, Any]] = None,
         field: str = "response",
     ) -> Optional[Any]:
-        """
-        Like emit(), but if a handler returns a non-None value for the
-        given context field, that value replaces the original. Last
-        writer wins.
-
-        Use for hooks that need to modify gateway data (e.g., response
-        text at agent:end).
-=======
-    async def emit_collect(
-        self,
-        event_type: str,
-        context: Optional[Dict[str, Any]] = None,
-    ) -> List[Any]:
-        """Fire handlers and return their non-None return values in order.
-
-        Like :meth:`emit` but captures each handler's return value. Used for
-        decision-style hooks (e.g. ``command:<name>`` policies that want to
-        allow/deny/rewrite the command before normal dispatch).
-
-        Exceptions from individual handlers are logged but do not abort the
-        remaining handlers.
->>>>>>> v2026.5.7
-        """
+        """Fire handlers and let non-None returns replace ``context[field]``."""
         if context is None:
             context = {}
 
-<<<<<<< HEAD
         current_value = context.get(field)
-
-        handlers = list(self._handlers.get(event_type, []))
-        if ":" in event_type:
-            base = event_type.split(":")[0]
-            wildcard_key = f"{base}:*"
-            handlers.extend(self._handlers.get(wildcard_key, []))
-
-        for fn in handlers:
-=======
-        results: List[Any] = []
         for fn in self._resolve_handlers(event_type):
->>>>>>> v2026.5.7
             try:
                 result = fn(event_type, context)
                 if asyncio.iscoroutine(result):
                     result = await result
                 if result is not None:
-<<<<<<< HEAD
                     current_value = result
                     context[field] = current_value
             except Exception as e:
-                print(f"[hooks] Error in handler for '{event_type}': {e}", flush=True)
-
+                print("[hooks] Error in handler for {!r}: {}".format(event_type, e), flush=True)
         return current_value
-=======
+
+    async def emit_collect(
+        self,
+        event_type: str,
+        context: Optional[Dict[str, Any]] = None,
+    ) -> List[Any]:
+        """Fire handlers and return their non-None return values in order."""
+        if context is None:
+            context = {}
+
+        results: List[Any] = []
+        for fn in self._resolve_handlers(event_type):
+            try:
+                result = fn(event_type, context)
+                if asyncio.iscoroutine(result):
+                    result = await result
+                if result is not None:
                     results.append(result)
             except Exception as e:
-                print(f"[hooks] Error in handler for '{event_type}': {e}", flush=True)
+                print("[hooks] Error in handler for {!r}: {}".format(event_type, e), flush=True)
         return results
->>>>>>> v2026.5.7

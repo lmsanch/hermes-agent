@@ -280,6 +280,23 @@ TOOLSETS = {
     },
 
 
+    "alpaca": {
+        "description": "Alpaca paper trading position monitor — read-only account/position/exit-check tools (gated on ALPACA_API_KEY + ALPACA_SECRET_KEY)",
+        "tools": ["alpaca_get_positions", "alpaca_check_exit", "alpaca_get_account"],
+        "includes": []
+    },
+
+    "prediction_markets": {
+        "description": "Prediction market data — live prices, orderbooks, cross-market signals from Kalshi + Polymarket (gated on pykalshi importable)",
+        "tools": [
+            "pm_search_markets", "pm_get_market", "pm_get_orderbook",
+            "pm_get_candlesticks", "pm_get_price_history", "pm_get_trades",
+            "pm_cross_market_signals", "pm_volume_spike_scan",
+        ],
+        "includes": []
+    },
+
+
     # Scenario-specific toolsets
     
     "debugging": {
