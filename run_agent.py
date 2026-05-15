@@ -9202,15 +9202,19 @@ class AIAgent:
         # those with HTTP 400. When the active provider enforces the
         # thinking-mode echo, upgrade "" → " " on replay so stale history
         # doesn't 400 the user on the next turn.
+        needs_thinking_pad = self._needs_thinking_reasoning_pad()
+
         existing = source_msg.get("reasoning_content")
         if isinstance(existing, str):
-            if existing == "" and self._needs_thinking_reasoning_pad():
-                api_msg["reasoning_content"] = " "
+            if needs_thinking_pad:
+                api_msg["reasoning_content"] = " " if existing == "" else existing
             else:
-                api_msg["reasoning_content"] = existing
+                # Most OpenAI-compatible providers reject provider-specific
+                # reasoning_content on assistant history. Keep it in persisted
+                # session storage, but do not replay it unless the active
+                # provider explicitly requires thinking-mode echo-back.
+                api_msg.pop("reasoning_content", None)
             return
-
-        needs_thinking_pad = self._needs_thinking_reasoning_pad()
 
         # 2. Cross-provider poisoned history (#15748): on DeepSeek/Kimi,
         # if the source turn has tool_calls AND a 'reasoning' field but no
@@ -9238,7 +9242,7 @@ class AIAgent:
         # This must happen before the unconditional empty-string fallback so
         # genuine reasoning content is not overwritten (#15812 regression in
         # PR #15478).
-        if isinstance(normalized_reasoning, str) and normalized_reasoning:
+        if needs_thinking_pad and isinstance(normalized_reasoning, str) and normalized_reasoning:
             api_msg["reasoning_content"] = normalized_reasoning
             return
 
