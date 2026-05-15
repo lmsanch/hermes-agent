@@ -8533,6 +8533,7 @@ class AIAgent:
         self._codex_incomplete_retries = 0
         self._thinking_prefill_retries = 0
         self._post_tool_empty_retried = False
+        self._zero_tool_call_retried = False
         self._last_content_with_tools = None
         self._last_content_tools_all_housekeeping = False
         self._mute_post_response = False
@@ -11087,6 +11088,39 @@ class AIAgent:
                 else:
                     # No tool calls - this is the final response
                     final_response = assistant_message.content or ""
+                    
+                    # ── Zero-tool-call re-prompt guard ─────────────────────
+                    # qwen3-32b sometimes responds from parametric memory instead
+                    # of calling MCP tools, especially for "quick" questions where
+                    # it thinks it knows the answer. Re-prompt once with explicit
+                    # tool instruction before accepting the response.
+                    # Mirrors research API guard in deep_researcher.py:454-463.
+                    if (
+                        self.valid_tool_names
+                        and api_call_count == 1
+                        and not getattr(self, "_zero_tool_call_retried", False)
+                    ):
+                        self._zero_tool_call_retried = True
+                        logger.info(
+                            "Zero-tool-call on first turn with tools available — "
+                            "re-prompting with explicit tool instruction (model=%s, provider=%s)",
+                            self.model, self.provider,
+                        )
+                        self._emit_status(
+                            "↻ Model skipped tool calls — re-prompting with explicit "
+                            "tool instruction"
+                        )
+                        interim_msg = self._build_assistant_message(assistant_message, finish_reason)
+                        messages.append(interim_msg)
+                        messages.append({
+                            "role": "user",
+                            "content": (
+                                "You have tools available that could answer this question "
+                                "more accurately. Please call the relevant tool before "
+                                "responding."
+                            ),
+                        })
+                        continue
                     
                     # Fix: unmute output when entering the no-tool-call branch
                     # so the user can see empty-response warnings and recovery
