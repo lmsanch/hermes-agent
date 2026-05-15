@@ -555,6 +555,18 @@ def _normalize_messages_for_groq(messages: list) -> list:
     return result
 
 
+def _provider_needs_content_normalization(provider_name: str, base_url_lower: str) -> bool:
+    """Return True for providers that reject object-typed message content."""
+    p = (provider_name or "").lower()
+    b = (base_url_lower or "").lower()
+    return (
+        "groq" in p
+        or "fireworks" in p
+        or "api.groq.com" in b
+        or "api.fireworks.ai" in b
+    )
+
+
 def _sanitize_tools_non_ascii(tools: list) -> bool:
     """Strip non-ASCII characters from tool payloads in-place."""
     return _sanitize_structure_non_ascii(tools)
@@ -6801,13 +6813,13 @@ class AIAgent:
         # Groq requires content to be a plain string, not a list of content
         # blocks.  The OpenAI SDK wraps strings into [{type: text, text: ...}]
         # before serializing; this reverses that for Groq providers.
-        if "groq" in self._base_url_lower or self.provider == "groq":
+        if _provider_needs_content_normalization(self.provider, self._base_url_lower):
             sanitized_messages = _normalize_messages_for_groq(sanitized_messages)
             for i, msg in enumerate(sanitized_messages):
                 if msg.get("role") == "tool":
                     content = msg.get("content")
                     logger.debug(
-                        "Groq tool message %d content type: %s",
+                        "Normalized tool message %d content type: %s",
                         i,
                         type(content).__name__,
                     )
@@ -8341,12 +8353,12 @@ class AIAgent:
                 final_response = (assistant_message.content or "").strip() if assistant_message else ""
             else:
                 _summary_messages = api_messages
-                if "groq" in self._base_url_lower or self.provider == "groq":
+                if _provider_needs_content_normalization(self.provider, self._base_url_lower):
                     _summary_messages = _normalize_messages_for_groq(_summary_messages)
                     for i, msg in enumerate(_summary_messages):
                         if msg.get("role") == "tool":
                             logger.debug(
-                                "Groq tool message %d content type: %s",
+                                "Normalized tool message %d content type: %s",
                                 i,
                                 type(msg.get("content")).__name__,
                             )
@@ -8416,12 +8428,12 @@ class AIAgent:
                     final_response = (_retry_msg.content or "").strip()
                 else:
                     _retry_messages = api_messages
-                    if "groq" in self._base_url_lower or self.provider == "groq":
+                    if _provider_needs_content_normalization(self.provider, self._base_url_lower):
                         _retry_messages = _normalize_messages_for_groq(_retry_messages)
                         for i, msg in enumerate(_retry_messages):
                             if msg.get("role") == "tool":
                                 logger.debug(
-                                    "Groq tool message %d content type: %s",
+                                    "Normalized tool message %d content type: %s",
                                     i,
                                     type(msg.get("content")).__name__,
                                 )
