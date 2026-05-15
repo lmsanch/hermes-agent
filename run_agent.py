@@ -40,7 +40,7 @@ import uuid
 from typing import List, Dict, Any, Optional
 from openai import OpenAI
 import fire
-from datetime import datetime
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 from hermes_constants import get_hermes_home
@@ -553,6 +553,20 @@ def _normalize_messages_for_groq(messages: list) -> list:
             msg = {**msg, "content": "\n".join(p for p in parts if p)}
         result.append(msg)
     return result
+
+
+def _append_trace_line(agent: str, trace_entry: dict) -> None:
+    """Append one JSONL trace line to ``~/.hermes/profiles/<agent>/traces/YYYY-MM-DD.jsonl``."""
+    try:
+        from hermes_constants import get_hermes_home
+        traces_dir = get_hermes_home() / "traces"
+        traces_dir.mkdir(parents=True, exist_ok=True)
+        today = date.today().isoformat()
+        trace_file = traces_dir / f"{today}.jsonl"
+        with open(trace_file, "a", encoding="utf-8") as f:
+            f.write(json.dumps(trace_entry, ensure_ascii=False) + "\n")
+    except Exception:
+        logger.debug("trace logging failed", exc_info=True)
 
 
 def _provider_needs_content_normalization(provider_name: str, base_url_lower: str) -> bool:
@@ -8792,6 +8806,7 @@ class AIAgent:
         truncated_response_prefix = ""
         compression_attempts = 0
         _turn_exit_reason = "unknown"  # Diagnostic: why the loop ended
+        _trace_start_time = time.time()
         
         # Record the execution thread so interrupt()/clear_interrupt() can
         # scope the tool-level interrupt signal to THIS agent's thread only.
@@ -11558,6 +11573,67 @@ class AIAgent:
             )
         else:
             logger.info(_diag_msg, *_diag_args)
+
+        # ── Per-turn JSONL trace logging (#1311) ──────────────────────
+        _trace_tool_calls = []
+        _trace_consults = []
+        for _m in messages:
+            if not isinstance(_m, dict) or _m.get("role") != "assistant":
+                continue
+            for _tc in (_m.get("tool_calls") or []):
+                if not isinstance(_tc, dict):
+                    continue
+                _fn = _tc.get("function", {})
+                _name = _fn.get("name", "")
+                _args_summary = _fn.get("arguments", "")
+                if isinstance(_args_summary, str) and len(_args_summary) > 200:
+                    _args_summary = _args_summary[:200] + "…"
+                _tcid = _tc.get("id", "")
+                _status = "ok"
+                for _tm in messages:
+                    if (isinstance(_tm, dict)
+                            and _tm.get("role") == "tool"
+                            and _tm.get("tool_call_id") == _tcid):
+                        _content = _tm.get("content", "")
+                        if isinstance(_content, str) and _content.startswith('{"error"'):
+                            _status = "error"
+                        break
+                _tc_entry = {"name": _name, "args_summary": _args_summary, "status": _status}
+                _trace_tool_calls.append(_tc_entry)
+                if _name == "consult_colleague":
+                    try:
+                        _cargs = json.loads(_fn.get("arguments", "{}"))
+                        _trace_consults.append({
+                            "colleague": _cargs.get("agent", ""),
+                            "query_summary": (_cargs.get("query", "")[:100]),
+                        })
+                    except Exception:
+                        pass
+        _fabrication_detected = (
+            _turn_exit_reason.startswith("text_response")
+            and api_call_count == 1
+            and len(_trace_tool_calls) == 0
+            and bool(self.valid_tool_names)
+        )
+        try:
+            from hermes_cli.profiles import get_active_profile_name
+            _trace_agent = get_active_profile_name()
+        except Exception:
+            _trace_agent = "default"
+        _append_trace_line(_trace_agent, {
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "agent": _trace_agent,
+            "model": self.model,
+            "tool_calls": _trace_tool_calls,
+            "consults": _trace_consults,
+            "latency_ms": int((time.time() - _trace_start_time) * 1000),
+            "token_in": self.session_input_tokens,
+            "token_out": self.session_output_tokens,
+            "fabrication_detected": _fabrication_detected,
+            "exit_reason": _turn_exit_reason,
+            "api_calls": api_call_count,
+            "session_id": self.session_id or "",
+        })
 
         # Plugin hook: post_llm_call
         # Fired once per turn after the tool-calling loop completes.
