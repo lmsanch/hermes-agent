@@ -13,6 +13,7 @@ Built-in TTS providers:
 - NeuTTS (local, free, no API key): On-device TTS via neutts
 - KittenTTS (local, free, no API key): On-device 25MB model
 - Piper (local, free, no API key): OHF-Voice/piper1-gpl neural VITS, 44 languages
+- Fish Audio: Voice cloning / persona voices, needs FISH_AUDIO_API_KEY
 
 Custom command providers:
 - Users can declare any number of named providers with ``type: command``
@@ -178,6 +179,7 @@ PROVIDER_MAX_TEXT_LENGTH: Dict[str, int] = {
     "neutts": 2000,       # local model, quality falls off on long text
     "kittentts": 2000,    # local 25MB model
     "piper": 5000,        # local VITS model, phoneme-based; practical cap
+    "fish": 2000,         # Fish Audio API practical cap
 }
 
 # ElevenLabs caps vary by model_id. https://elevenlabs.io/docs/overview/models
@@ -324,6 +326,7 @@ BUILTIN_TTS_PROVIDERS = frozenset({
     "neutts",
     "kittentts",
     "piper",
+    "fish",
 })
 
 DEFAULT_COMMAND_TTS_TIMEOUT_SECONDS = 120
@@ -1250,6 +1253,36 @@ def _default_neutts_ref_text() -> str:
     return str(Path(__file__).parent / "neutts_samples" / "jo.txt")
 
 
+
+# ===========================================================================
+# Provider: Fish Audio TTS
+# ===========================================================================
+def _generate_fish_audio(text: str, output_path: str, tts_config: Dict[str, Any]) -> str:
+    api_key = get_env_value("FISH_AUDIO_API_KEY") or tts_config.get("fish", {}).get("api_key", "")
+    if not api_key:
+        raise RuntimeError("FISH_AUDIO_API_KEY not set")
+    voice_id = tts_config.get("fish", {}).get("voice_id") or get_env_value("FISH_AUDIO_VOICE_ID") or ""
+    if not voice_id:
+        raise RuntimeError("FISH_AUDIO_VOICE_ID not set")
+    base_url = tts_config.get("fish", {}).get("base_url", "https://api.fish.audio")
+    import urllib.request
+    import json as _json
+    fish_format = "opus" if output_path.endswith(".ogg") else "mp3"
+    payload = _json.dumps({"text": text, "reference_id": voice_id, "format": fish_format}).encode("utf-8")
+    req = urllib.request.Request(
+        f"{base_url}/v1/tts",
+        data=payload,
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=60) as resp:
+        audio = resp.read()
+    if not audio or len(audio) < 100:
+        raise RuntimeError("Fish Audio returned empty or tiny response")
+    with open(output_path, "wb") as f:
+        f.write(audio)
+    return output_path
+
 def _generate_neutts(text: str, output_path: str, tts_config: Dict[str, Any]) -> str:
     """Generate speech using the local NeuTTS engine.
 
@@ -1579,6 +1612,8 @@ def text_to_speech_tool(
     # and needs ffmpeg for conversion.
     from gateway.session_context import get_session_env
     platform = get_session_env("HERMES_SESSION_PLATFORM", "").lower()
+    if not platform:
+        platform = os.getenv("HERMES_SESSION_PLATFORM", "").lower()
     want_opus = (platform == "telegram")
 
     # Determine output path
@@ -1600,7 +1635,7 @@ def text_to_speech_tool(
             file_path = out_dir / f"tts_{timestamp}.{fmt}"
         # Use .ogg for Telegram with providers that support native Opus output,
         # otherwise fall back to .mp3 (Edge TTS will attempt ffmpeg conversion later).
-        elif want_opus and provider in ("openai", "elevenlabs", "mistral", "gemini"):
+        elif want_opus and provider in ("openai", "elevenlabs", "mistral", "gemini", "fish"):
             file_path = out_dir / f"tts_{timestamp}.ogg"
         else:
             file_path = out_dir / f"tts_{timestamp}.mp3"
@@ -1665,6 +1700,10 @@ def text_to_speech_tool(
             logger.info("Generating speech with Google Gemini TTS...")
             _generate_gemini_tts(text, file_str, tts_config)
 
+        elif provider == "fish":
+            logger.info("Generating speech with Fish Audio...")
+            _generate_fish_audio(text, file_str, tts_config)
+
         elif provider == "neutts":
             if not _check_neutts_available():
                 return json.dumps({
@@ -1701,8 +1740,8 @@ def text_to_speech_tool(
             logger.info("Generating speech with Piper (local)...")
             _generate_piper_tts(text, file_str, tts_config)
 
-        else:
-            # Default: Edge TTS (free), with NeuTTS as local fallback
+        elif provider == "edge":
+            # Edge TTS (free), with NeuTTS as local fallback
             edge_available = True
             try:
                 _import_edge_tts()
@@ -1730,6 +1769,18 @@ def text_to_speech_tool(
                              "or set up NeuTTS for local synthesis."
                 }, ensure_ascii=False)
 
+        else:
+            # Fail loud on unknown provider. Silently falling back to Edge
+            # masked a Fish Audio regression for ~a day (toryx-private#797).
+            known = sorted(BUILTIN_TTS_PROVIDERS)
+            msg = (
+                f"TTS provider {provider!r} is not implemented. "
+                f"Known providers: {', '.join(known)}. "
+                f"Check your tts.provider config."
+            )
+            logger.error("tts: %s", msg)
+            return json.dumps({"success": False, "error": msg}, ensure_ascii=False)
+
         # Check the file was actually created
         if not os.path.exists(file_str) or os.path.getsize(file_str) == 0:
             return json.dumps({
@@ -1750,12 +1801,12 @@ def text_to_speech_tool(
                     if opus_path:
                         file_str = opus_path
                 voice_compatible = file_str.endswith(".ogg")
-        elif provider in ("edge", "neutts", "minimax", "xai", "kittentts", "piper") and not file_str.endswith(".ogg"):
+        elif provider in ("edge", "neutts", "minimax", "xai", "kittentts", "piper", "fish") and not file_str.endswith(".ogg"):
             opus_path = _convert_to_opus(file_str)
             if opus_path:
                 file_str = opus_path
                 voice_compatible = True
-        elif provider in ("elevenlabs", "openai", "mistral", "gemini"):
+        elif provider in ("elevenlabs", "openai", "mistral", "gemini", "fish"):
             voice_compatible = file_str.endswith(".ogg")
 
         file_size = os.path.getsize(file_str)
