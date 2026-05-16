@@ -103,6 +103,18 @@ class TestMarkdownStripping:
         result = _strip_markdown_for_tts(text)
         assert len(result) == 5000
 
+    def test_strips_delimited_stage_directions(self):
+        text = "Yes. - long pause - That risk is real. *smiles* [sigh] (beat)"
+        assert _strip_markdown_for_tts(text) == "Yes. That risk is real."
+
+    def test_strips_standalone_stage_direction_lines(self):
+        text = "First point.\nlong pause\nSecond point."
+        assert _strip_markdown_for_tts(text) == "First point.\nSecond point."
+
+    def test_keeps_normal_simile_wording(self):
+        text = "A simile can clarify the point."
+        assert _strip_markdown_for_tts(text) == text
+
     def test_complex_response(self):
         text = (
             "## Answer\n\n"

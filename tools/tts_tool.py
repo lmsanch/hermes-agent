@@ -1587,6 +1587,10 @@ def text_to_speech_tool(
     if not text or not text.strip():
         return tool_error("Text is required", success=False)
 
+    text = _strip_markdown_for_tts(text)
+    if not text:
+        return tool_error("Text is empty after removing non-spoken markup", success=False)
+
     tts_config = _load_tts_config()
     provider = _get_provider(tts_config)
 
@@ -1942,10 +1946,41 @@ _MD_LIST_ITEM = re.compile(r'^\s*[-*]\s+', flags=re.MULTILINE)
 _MD_HR = re.compile(r'---+')
 _MD_EXCESS_NL = re.compile(r'\n{3,}')
 
+_TTS_STAGE_DIRECTION_WORDS = (
+    r"(?:long\s+)?pause",
+    r"silence",
+    r"beat",
+    r"smiles?",
+    r"simile",  # observed misspoken cue typo; strip only when delimited
+    r"laughs?",
+    r"chuckles?",
+    r"sighs?",
+    r"breath(?:e|es|ing)?",
+    r"inhales?",
+    r"exhales?",
+    r"clears?\s+throat",
+    r"nods?",
+    r"shrugs?",
+    r"thinking",
+)
+_TTS_STAGE_DIRECTION_BODY = r"(?:" + r"|".join(_TTS_STAGE_DIRECTION_WORDS) + r")(?:\s*[,.]\s*(?:" + r"|".join(_TTS_STAGE_DIRECTION_WORDS) + r"))*"
+_TTS_STAGE_DIRECTION_PATTERNS = (
+    re.compile(r"(?<!\w)[\[(]\s*" + _TTS_STAGE_DIRECTION_BODY + r"\s*[\])]", re.IGNORECASE),
+    re.compile(r"(?<!\w)[*_]\s*" + _TTS_STAGE_DIRECTION_BODY + r"\s*[*_](?!\w)", re.IGNORECASE),
+    re.compile(r"(?<!\w)[\-–—]\s*" + _TTS_STAGE_DIRECTION_BODY + r"\s*[\-–—](?!\w)", re.IGNORECASE),
+)
+_TTS_STANDALONE_STAGE_DIRECTION_LINE = re.compile(
+    r"^\s*" + _TTS_STAGE_DIRECTION_BODY + r"\s*[.!?]?\s*$",
+    re.IGNORECASE | re.MULTILINE,
+)
+
 
 def _strip_markdown_for_tts(text: str) -> str:
-    """Remove markdown formatting that shouldn't be spoken aloud."""
+    """Remove markdown and non-spoken delivery cues from TTS input."""
     text = _MD_CODE_BLOCK.sub(' ', text)
+    for pattern in _TTS_STAGE_DIRECTION_PATTERNS:
+        text = pattern.sub(' ', text)
+    text = _TTS_STANDALONE_STAGE_DIRECTION_LINE.sub(' ', text)
     text = _MD_LINK.sub(r'\1', text)
     text = _MD_URL.sub('', text)
     text = _MD_BOLD.sub(r'\1', text)
@@ -1954,7 +1989,9 @@ def _strip_markdown_for_tts(text: str) -> str:
     text = _MD_HEADER.sub('', text)
     text = _MD_LIST_ITEM.sub('', text)
     text = _MD_HR.sub('', text)
-    text = _MD_EXCESS_NL.sub('\n\n', text)
+    text = re.sub(r'[ \t]{2,}', ' ', text)
+    text = re.sub(r'[ \t]*\n[ \t]*', '\n', text)
+    text = re.sub(r'\n{2,}', '\n', text)
     return text.strip()
 
 
