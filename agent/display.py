@@ -814,6 +814,15 @@ def _detect_tool_failure(tool_name: str, result: str | None) -> tuple[bool, str]
             if data.get("success") is False and "exceed the limit" in data.get("error", ""):
                 return True, " [full]"
 
+    # Defensive: callers may pass non-string results (dict / None).
+    # Coerce so slicing + .lower() always work.
+    if not isinstance(result, str):
+        try:
+            import json as _json
+            result = _json.dumps(result) if result is not None else ""
+        except Exception:
+            result = str(result) if result is not None else ""
+
     # Generic heuristic for non-terminal tools
     # Multimodal tool results (dicts with _multimodal=True) are not strings —
     # treat them as successes since failures would be JSON-encoded strings.
