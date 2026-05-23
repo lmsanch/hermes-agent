@@ -8454,6 +8454,18 @@ class GatewayRunner:
                 await self._deliver_platform_notice(source, notice)
         
         # -----------------------------------------------------------------
+        # Voice input brevity — when user sends a voice message, the
+        # response will be read aloud via TTS. Keep answers concise and
+        # conversational (2-3 sentences max). No markdown, no lists.
+        # -----------------------------------------------------------------
+        if event.message_type == MessageType.VOICE:
+            context_prompt += (                "\n\n[System note: The user sent a voice message. Your reply "
+                "will be read aloud via text-to-speech. Keep it brief, "
+                "conversational, and spoken-style — 2-3 sentences max. "
+                "No markdown, no bullet lists, no code blocks. Answer as "
+                "if talking on a walkie-talkie.]"
+            )
+        # -----------------------------------------------------------------
         # Voice channel awareness — inject current voice channel state
         # into context so the agent knows who is in the channel and who
         # is speaking, without needing a separate tool call.
@@ -11820,17 +11832,17 @@ class GatewayRunner:
             return t("gateway.verbose.not_enabled")
 
         # --- cycle mode (per-platform) ----------------------------------------
-        cycle = ["off", "new", "all", "verbose"]
+        cycle = ["off", "internal", "new", "all", "verbose"]
         descriptions = {
             "off": t("gateway.verbose.mode_off"),
+            "internal": "⚙️ Tool progress: **INTERNAL** — hides retrieval/search tools, shows a collapsed summary (default for Telegram).",
             "new": t("gateway.verbose.mode_new"),
             "all": t("gateway.verbose.mode_all"),
             "verbose": t("gateway.verbose.mode_verbose"),
         }
 
-        # Read current effective mode for this platform via the resolver
         from gateway.display_config import resolve_display_setting
-        current = resolve_display_setting(user_config, platform_key, "tool_progress", "all")
+        current = resolve_display_setting(user_config, platform_key, "tool_progress", "internal")
         if current not in cycle:
             current = "all"
         idx = (cycle.index(current) + 1) % len(cycle)
@@ -14227,6 +14239,7 @@ class GatewayRunner:
         in a ``finally`` block.
         """
         from gateway.session_context import set_session_vars
+        os.environ["HERMES_SESSION_PLATFORM"] = context.source.platform.value
         return set_session_vars(
             platform=context.source.platform.value,
             chat_id=context.source.chat_id,
@@ -15596,6 +15609,8 @@ class GatewayRunner:
         last_tool = [None]  # Mutable container for tracking in closure
         last_progress_msg = [None]  # Track last message for dedup
         repeat_count = [0]  # How many times the same message repeated
+        _internal_counter = [0]  # Count of suppressed internal tool calls
+        last_internal_tool = [None]  # Last internal tool name (for collapsed summary)
 
         # Auto-cleanup of temporary progress bubbles (Telegram + any adapter
         # that implements ``delete_message``). When enabled via
@@ -15653,9 +15668,14 @@ class GatewayRunner:
                     logger.debug("tool-progress onboarding hint failed: %s", _hint_err)
                 return
 
-
-            # Only act on tool.started events (ignore tool.completed, reasoning.available, etc.)
             if event_type not in {"tool.started",}:
+                return
+
+            from gateway.display_config import is_internal_tool
+            _is_internal = is_internal_tool(tool_name or "")
+            if _is_internal and progress_mode in ("internal", "new"):
+                _internal_counter[0] += 1
+                last_internal_tool[0] = tool_name
                 return
 
             # Suppress tool-progress bubbles once the user has sent `stop`.
@@ -16088,6 +16108,14 @@ class GatewayRunner:
         result_holder = [None]  # Mutable container for the result
         tools_holder = [None]   # Mutable container for the tool definitions
         stream_consumer_holder = [None]  # Mutable container for stream consumer
+        
+        if _internal_counter[0] > 0 and progress_queue is not None:
+            _summary_parts = []
+            if _internal_counter[0] == 1:
+                _summary_parts.append(f"🔍 {last_internal_tool[0] or 'searching'}…")
+            else:
+                _summary_parts.append(f"🔍 Searching… ({_internal_counter[0]} queries)")
+            progress_queue.put(_summary_parts[0])
         
         # Bridge sync step_callback → async hooks.emit for agent:step events
         _loop_for_step = asyncio.get_running_loop()

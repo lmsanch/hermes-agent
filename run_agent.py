@@ -3884,6 +3884,15 @@ class AIAgent:
         ]
         return api_msg
 
+    def _supports_reasoning_content(self) -> bool:
+        provider = getattr(self, 'provider_label', '') or ''
+        base_url = getattr(self, 'base_url', '') or ''
+        unsupported = ('groq', 'cerebras', 'sambanova')
+        for u in unsupported:
+            if u in provider.lower() or u in base_url.lower():
+                return False
+        return True
+
     @staticmethod
     def _sanitize_tool_call_arguments(
         messages: list,

@@ -1834,6 +1834,10 @@ def copy_reasoning_content_for_api(agent, source_msg: dict, api_msg: dict) -> No
     if source_msg.get("role") != "assistant":
         return
 
+    if not agent._supports_reasoning_content():
+        api_msg.pop("reasoning_content", None)
+        return
+
     # 1. Explicit reasoning_content already set — preserve it verbatim
     # (includes DeepSeek/Kimi's own space-placeholder written at creation
     # time, and any valid reasoning content from the same provider).
