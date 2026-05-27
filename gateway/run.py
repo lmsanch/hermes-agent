@@ -11158,6 +11158,8 @@ class GatewayRunner:
         chat_id = event.source.chat_id
         voice_mode = self._voice_mode.get(self._voice_key(event.source.platform, chat_id), "off")
         is_voice_input = (event.message_type == MessageType.VOICE)
+        if not is_voice_input:
+            return False
 
         should = (
             (voice_mode == "all")

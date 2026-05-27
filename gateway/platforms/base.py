@@ -3276,6 +3276,12 @@ class BasePlatformAdapter(ABC):
                 # Extract MEDIA:<path> tags (from TTS tool) before other processing
                 media_files, response = self.extract_media(response)
                 media_files = self.filter_media_delivery_paths(media_files)
+                if event.message_type != MessageType.VOICE:
+                    media_files = [
+                        (media_path, is_voice)
+                        for media_path, is_voice in media_files
+                        if not (is_voice and Path(media_path).suffix.lower() in _AUDIO_EXTS)
+                    ]
 
                 # Extract image URLs and send them as native platform attachments
                 images, text_content = self.extract_images(response)

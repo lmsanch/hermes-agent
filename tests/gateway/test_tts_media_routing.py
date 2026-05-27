@@ -50,6 +50,12 @@ def _event(thread_id=None):
     )
 
 
+def _voice_event(thread_id=None):
+    event = _event(thread_id=thread_id)
+    event.message_type = MessageType.VOICE
+    return event
+
+
 def _allowed_media_path(tmp_path, monkeypatch, name):
     root = tmp_path / "media-cache"
     media_file = root / name
@@ -103,7 +109,7 @@ async def test_base_adapter_routes_non_voice_telegram_ogg_media_tag_to_document_
 @pytest.mark.asyncio
 async def test_base_adapter_routes_voice_tagged_telegram_ogg_media_tag_to_voice_sender(tmp_path, monkeypatch):
     adapter = _MediaRoutingAdapter()
-    event = _event()
+    event = _voice_event()
     media_file = _allowed_media_path(tmp_path, monkeypatch, "speech.ogg")
     adapter._message_handler = AsyncMock(
         return_value=f"[[audio_as_voice]]\nMEDIA:{media_file}"
@@ -129,6 +135,36 @@ def _fake_runner(thread_meta):
         _reply_anchor_for_event=lambda event: None,
     )
     return runner
+
+
+@pytest.mark.asyncio
+async def test_base_adapter_suppresses_tts_voice_media_for_text_input(tmp_path, monkeypatch):
+    adapter = _MediaRoutingAdapter()
+    event = _event()
+    media_file = _allowed_media_path(tmp_path, monkeypatch, "speech.ogg")
+    adapter._message_handler = AsyncMock(
+        return_value=f"Text answer only.\n[[audio_as_voice]]\nMEDIA:{media_file}"
+    )
+    adapter.send = AsyncMock(return_value=SendResult(success=True, message_id="text"))
+    adapter.send_voice = AsyncMock(return_value=SendResult(success=True, message_id="voice"))
+    adapter.send_document = AsyncMock(return_value=SendResult(success=True, message_id="doc"))
+
+    await adapter._process_message_background(event, build_session_key(event.source))
+
+    adapter.send_voice.assert_not_awaited()
+    adapter.send_document.assert_not_awaited()
+    adapter.send.assert_awaited_once()
+    assert "Text answer only." in adapter.send.await_args.kwargs["content"]
+
+
+def test_runner_voice_reply_requires_voice_input_even_when_voice_mode_all():
+    runner = object.__new__(GatewayRunner)
+    event = _event()
+    runner._voice_mode = {
+        runner._voice_key(event.source.platform, event.source.chat_id): "all"
+    }
+
+    assert runner._should_send_voice_reply(event, "Text answer", [], already_sent=True) is False
 
 
 @pytest.mark.asyncio
