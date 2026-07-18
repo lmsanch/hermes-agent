@@ -2119,9 +2119,41 @@ class BasePlatformAdapter(ABC):
     def prepare_tts_text(self, text: str) -> str:
         """Prepare text for TTS. Override to filter tool output, code, etc.
 
-        Default strips markdown formatting and truncates to 4000 chars.
+        Fenced code blocks, tables, list/quote markers, and horizontal
+        rules read as garbled noise (regex, code identifiers, pipe
+        characters) rather than speech when passed to a TTS engine
+        verbatim -- they're dropped here rather than just having their
+        markdown punctuation stripped. Common math notation is spelled
+        out since voice-cloning models can't render symbols like '×'.
+        Truncates to 4000 chars after cleanup.
         """
-        return re.sub(r'[*_`#\[\]()]', '', text)[:4000].strip()
+        # Fenced code blocks first -- code/regex read as noise, not speech
+        text = re.sub(r'```.*?```', '', text, flags=re.DOTALL)
+        # Inline code spans -- drop the content too, not just the backticks
+        # (e.g. `re.compile(r"[.!?]+\s*")` is as unspeakable as a fenced block)
+        text = re.sub(r'`[^`\n]*`', '', text)
+        # Markdown tables (header/divider/data rows all use leading '|')
+        text = re.sub(r'^\s*\|.*\|\s*$', '', text, flags=re.MULTILINE)
+        # Horizontal rules (---, ***, ___ on their own line)
+        text = re.sub(r'^\s*[-*_]{3,}\s*$', '', text, flags=re.MULTILINE)
+        # Leading list/blockquote markers
+        text = re.sub(r'^\s*[-*+>]\s+', '', text, flags=re.MULTILINE)
+        text = re.sub(r'^\s*\d+\.\s+', '', text, flags=re.MULTILINE)
+        # Spell out common math/notation symbols instead of dropping them
+        text = (
+            text.replace('×', ' times ')
+            .replace('→', ' to ')
+            .replace('≈', ' approximately ')
+            .replace('≥', ' at least ')
+            .replace('≤', ' at most ')
+        )
+        # Remaining markdown emphasis/heading/bracket punctuation
+        text = re.sub(r'[*_`#\[\]()]', '', text)
+        # Collapse runs of spaces left behind by removed inline code
+        text = re.sub(r'[ \t]{2,}', ' ', text)
+        # Collapse blank lines left behind by the removals above
+        text = re.sub(r'\n{3,}', '\n\n', text).strip()
+        return text[:4000].strip()
 
     async def play_tts(
         self,
