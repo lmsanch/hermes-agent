@@ -33,6 +33,7 @@ import json
 import logging
 import os
 import re
+import subprocess
 import sys
 import threading
 import time
@@ -842,6 +843,70 @@ def create_mcp_server(event_bridge: Optional[EventBridge] = None) -> "FastMCP":
             return json.dumps({"error": "consult_colleague tool not available"})
         except Exception as e:
             return json.dumps({"error": f"consult failed: {e}"})
+
+    # -- fleet_ssh -----------------------------------------------------------
+
+    _FLEET_SSH_HOSTS = ("luis-dnn-1", "spark-8a52")
+
+    @mcp.tool()
+    def fleet_ssh(host: str, command: str, timeout: int = 60) -> str:
+        """Run a shell command over SSH on an allowlisted Toryx fleet host.
+
+        Read/inspect the fleet directly instead of guessing whether a path,
+        repo, service, or file exists on another machine. Every command is
+        checked against hermes-agent's dangerous-command guard
+        (tools.approval) before it runs: safe commands (ls, cat, grep, find,
+        curl, systemctl status, hostname, uptime, nvidia-smi, etc.) execute
+        immediately; anything the guard flags as dangerous (rm -rf, DROP
+        TABLE, git push --force, chmod 777, service restarts, etc.) is
+        blocked outright -- there is no human available to approve inside
+        this session, so dangerous commands fail closed rather than hang or
+        silently run.
+
+        Args:
+            host: One of "luis-dnn-1" (DNN), "spark-8a52" (Spark). SSH aliases
+                must already be configured on this machine.
+            command: The shell command to run on the remote host.
+            timeout: Max seconds to wait for the command (default 60, max 300).
+        """
+        if host not in _FLEET_SSH_HOSTS:
+            return json.dumps({
+                "error": f"host must be one of {list(_FLEET_SSH_HOSTS)}, got {host!r}"
+            })
+        timeout = _coerce_int(timeout, default=60, minimum=1, maximum=300)
+
+        try:
+            from tools.approval import check_all_command_guards
+        except ImportError:
+            return json.dumps({"error": "approval guard unavailable -- refusing to run ungated commands"})
+
+        os.environ["HERMES_EXEC_ASK"] = "1"
+        try:
+            guard = check_all_command_guards(command, env_type="ssh")
+        except Exception as e:
+            return json.dumps({"error": f"guard check failed: {e}"})
+
+        if not guard.get("approved"):
+            return json.dumps({
+                "blocked": True,
+                "reason": guard.get("message", "blocked by dangerous-command guard"),
+            })
+
+        try:
+            proc = subprocess.run(
+                ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", host, command],
+                capture_output=True, text=True, timeout=timeout,
+            )
+            return json.dumps({
+                "host": host,
+                "returncode": proc.returncode,
+                "stdout": proc.stdout[:20000],
+                "stderr": proc.stderr[:5000],
+            }, indent=2)
+        except subprocess.TimeoutExpired:
+            return json.dumps({"error": f"timed out after {timeout}s"})
+        except Exception as e:
+            return json.dumps({"error": f"ssh failed: {e}"})
 
     # -- permissions_list_open ---------------------------------------------
 
