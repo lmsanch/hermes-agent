@@ -846,7 +846,7 @@ def create_mcp_server(event_bridge: Optional[EventBridge] = None) -> "FastMCP":
 
     # -- fleet_ssh -----------------------------------------------------------
 
-    _FLEET_SSH_HOSTS = ("luis-dnn-1", "spark-8a52")
+    _FLEET_SSH_HOSTS = ("luis-dNN", "hp")
 
     @mcp.tool()
     def fleet_ssh(host: str, command: str, timeout: int = 60) -> str:
@@ -863,9 +863,13 @@ def create_mcp_server(event_bridge: Optional[EventBridge] = None) -> "FastMCP":
         this session, so dangerous commands fail closed rather than hang or
         silently run.
 
+        This tool runs on Spark (where hermes mcp serve actually executes),
+        so `host` must be an alias resolvable from Spark's own SSH config
+        (~/.ssh/config on Spark), not from wherever the caller sits.
+
         Args:
-            host: One of "luis-dnn-1" (DNN), "spark-8a52" (Spark). SSH aliases
-                must already be configured on this machine.
+            host: One of "luis-dNN" (DNN), "hp" (z440). SSH aliases
+                must already be configured on Spark, where this tool runs.
             command: The shell command to run on the remote host.
             timeout: Max seconds to wait for the command (default 60, max 300).
         """
